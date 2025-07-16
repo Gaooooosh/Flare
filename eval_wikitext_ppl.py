@@ -48,7 +48,7 @@ def compute_ppl(model, tokenizer, max_len, batch_size=1):
     test_ds = load_dataset("/raid_sdh/home/xyg/wikitext", 'wikitext-103-raw-v1', split="test")
 
     # 2. Use our memory-efficient generator instead of creating giant lists
-    stride = max_len // 2
+    stride = max_len
     token_segments_iterator = create_token_segments(test_ds, tokenizer, max_len, stride)
 
     # 3. The DataCollator and DataLoader work directly with the iterator
@@ -103,7 +103,9 @@ class WikiPPLCallback(TrainerCallback):
 
 
 if __name__ == '__main__':
-    model_path = '/raid_sdh/home/xyg/output_qwen3b_redpajama_nope'
+    model_path = '/raid_sdh/home/xyg/output_qwen3b_redpajama_nope_20-32'
+    # model_path = '/raid_sdh/home/xyg/output_qwen3b_redpajama_nope'
+    # model_path = '/raid_sdh/home/xyg/output_qwen3b_redpajama'
     # model_path = '/raid_sdh/home/xyg/PRETRAINED_MODEL/qwen-3B'
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
@@ -113,6 +115,6 @@ if __name__ == '__main__':
         device_map='auto'
     )
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    patch_qwen_rope(model, no_rope_layers=list(range(20,33)))
+    # patch_qwen_rope(model, no_rope_layers=list(range(20,31)))
     tokenizer.pad_token = tokenizer.eos_token
     print(compute_ppl(model,tokenizer,max_len=1024*16,batch_size=1))

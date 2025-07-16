@@ -59,22 +59,36 @@ class DataArguments:
 # ----------- 3. 处理数据 -----------
 def make_data_module(data_args, tokenizer):
     raw_dataset_dict = load_dataset(data_args.data_path, split="train")  # ← 直接加载
-    train_dataset = raw_dataset_dict#.select(range(1000))
+    train_dataset = raw_dataset_dict.select(range(500000))
 
-    def tokenize(example):
+    def tokenize(example, max_length):
         tokens = tokenizer(
             example["text"],
             truncation=True,
-            max_length=data_args.max_seq_len,
+            max_length=max_length,
             return_overflowing_tokens=False,
         )
         return {"input_ids": tokens["input_ids"], "attention_mask": tokens["attention_mask"]}
 
-    train_dataset = train_dataset.map(
-        tokenize,
-        num_proc=16,
-        remove_columns=train_dataset.column_names,
-    )
+    # 确保数据集列名与模型输入匹配
+    train_dataset = train_dataset.map(tokenize, fn_kwargs={"max_length": data_args.max_seq_len}, num_proc=16)
+    train_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask'])
+
+    # 按比例混合两种上下文长度
+    import random
+    random.seed(42)  # 设置随机种子
+    mixed_train_dataset = []
+    lengths = [8192, data_args.max_seq_len]  # 示例比例
+    proportions = [0.25, 0.75]  # 示例比例
+    for length, proportion in zip(lengths, proportions):
+        sampled_dataset = train_dataset.shuffle(seed=42).select(range(int(len(train_dataset) * proportion)))
+        sampled_dataset = sampled_dataset.map(lambda x: tokenize(x, length), num_proc=16)
+        mixed_train_dataset.extend(sampled_dataset)
+
+    # 将混合数据集转换为Dataset对象
+    from datasets import Dataset
+    mixed_train_dataset = Dataset.from_list(mixed_train_dataset)
+    mixed_train_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask'])
 
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
@@ -90,9 +104,9 @@ def main():
     parser.add_argument("--model_name_or_path", type=str, default="/raid_sdh/home/xyg/PRETRAINED_MODEL/qwen-3B")
     parser.add_argument("--data_path", type=str, default="/raid_sdh/home/xyg/RedPajama")
     parser.add_argument("--max_seq_len", type=int, default=32768)
-    parser.add_argument("--output_dir", type=str, default="./output_qwen3b_redpajama_nope-20-32")
+    parser.add_argument("--output_dir", type=str, default="./output_qwen3b_redpajama_allrope")
     parser.add_argument("--rope_theta", type=float, default=1000000.0)
-    parser.add_argument("--no_rope_layers", type=int, nargs="*", default=list(range(20,32)))
+    parser.add_argument("--no_rope_layers", type=int, nargs="*", default=[])#list(range(20,34))
     args = parser.parse_args()
 
     # 分词器
@@ -127,12 +141,12 @@ def main():
         warmup_steps=100,
         bf16=True,
         logging_steps=1,
-        save_steps=500,
+        save_steps=100,
         save_total_limit=2,
         dataloader_num_workers=4,
-        max_steps=1000,
+        max_steps=300,
         gradient_checkpointing=True,
-        eval_steps=1,
+        # eval_steps=1,
         # deepspeed="ds_config_zero1.json",  # 单卡可用ZeRO-1
         report_to="tensorboard",
     )
@@ -147,6 +161,7 @@ def main():
 
     trainer.train()
     trainer.save_model(args.output_dir)
+
 
 if __name__ == "__main__":
     main()
