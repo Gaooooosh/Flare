@@ -90,9 +90,9 @@ def main():
     parser.add_argument("--model_name_or_path", type=str, default="/raid_sdh/home/xyg/PRETRAINED_MODEL/qwen-3B")
     parser.add_argument("--data_path", type=str, default="/raid_sdh/home/xyg/RedPajama")
     parser.add_argument("--max_seq_len", type=int, default=32768)
-    parser.add_argument("--output_dir", type=str, default="./output_qwen3b")
+    parser.add_argument("--output_dir", type=str, default="./output_qwen3b_redpajama_nope-20-32")
     parser.add_argument("--rope_theta", type=float, default=1000000.0)
-    parser.add_argument("--no_rope_layers", type=int, nargs="*", default=[])
+    parser.add_argument("--no_rope_layers", type=int, nargs="*", default=list(range(20,32)))
     args = parser.parse_args()
 
     # 分词器
@@ -130,7 +130,7 @@ def main():
         save_steps=500,
         save_total_limit=2,
         dataloader_num_workers=4,
-        max_steps=2000,
+        max_steps=1000,
         gradient_checkpointing=True,
         eval_steps=1,
         # deepspeed="ds_config_zero1.json",  # 单卡可用ZeRO-1

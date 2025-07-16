@@ -1,13 +1,15 @@
 """
 eval_wikitext_ppl.py
 功能：给定模型 + tokenizer + max_seq_len，返回 WikiText-103 上的滑动窗口 PPL
+使用evaluate库优化内存占用
 """
 import os
 
 from tqdm import tqdm
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import math
-import torch, evaluate
+import torch
+import evaluate
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 from transformers import DataCollatorForLanguageModeling
@@ -43,7 +45,7 @@ def compute_ppl(model, tokenizer, max_len, batch_size=1):
     device = next(model.parameters()).device
 
     # 1. Load the dataset object (this part is fine and memory-efficient)
-    test_ds = load_dataset("/raid_sdh/home/xyg/flare/wikitext", 'wikitext-103-raw-v1', split="test")
+    test_ds = load_dataset("/raid_sdh/home/xyg/wikitext", 'wikitext-103-raw-v1', split="test")
 
     # 2. Use our memory-efficient generator instead of creating giant lists
     stride = max_len // 2
@@ -101,7 +103,7 @@ class WikiPPLCallback(TrainerCallback):
 
 
 if __name__ == '__main__':
-    model_path = '/raid_sdh/home/xyg/flare/output_qwen3b_redpajama'
+    model_path = '/raid_sdh/home/xyg/output_qwen3b_redpajama_nope'
     # model_path = '/raid_sdh/home/xyg/PRETRAINED_MODEL/qwen-3B'
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
@@ -111,6 +113,6 @@ if __name__ == '__main__':
         device_map='auto'
     )
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    # patch_qwen_rope(model, no_rope_layers=list(range(20,33)))
+    patch_qwen_rope(model, no_rope_layers=list(range(20,33)))
     tokenizer.pad_token = tokenizer.eos_token
     print(compute_ppl(model,tokenizer,max_len=1024*16,batch_size=1))

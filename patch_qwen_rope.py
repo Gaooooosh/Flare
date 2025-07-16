@@ -23,7 +23,6 @@ def _patched_attn_forward(
     """改写后的 attention forward：指定层跳过 RoPE"""
     input_shape = hidden_states.shape[:-1]
     hidden_shape = (*input_shape, -1, self.head_dim)
-
     query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
     key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
     value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
@@ -85,6 +84,7 @@ def patch_qwen_rope(model, no_rope_layers: List[int]):
         if idx in no_rope_layers:
             # 标记并替换 forward
             layer.self_attn._rope_disabled = True
+            print(f"Disabling RoPE for layer {idx}")
             layer.self_attn.forward = _patched_attn_forward.__get__(
                 layer.self_attn, type(layer.self_attn)
             )
