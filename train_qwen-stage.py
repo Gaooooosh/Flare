@@ -8,7 +8,7 @@
 """
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
 import json
 import torch
 from dataclasses import dataclass, field
@@ -103,7 +103,11 @@ def make_data_module(data_args, tokenizer, stage=1):
     else:
         data_files = data_path
         print(f"Loading data from: {data_files}")
-        raw_dataset_dict = load_dataset("json", data_files=data_files, split="train").select(range(dataset_size))
+        raw_dataset = load_dataset("json", data_files=data_files, split="train")
+        actual_size = len(raw_dataset)
+        selected_size = min(dataset_size, actual_size)
+        # raw_dataset_dict = raw_dataset.select(range(selected_size))
+        raw_dataset_dict = raw_dataset.select(range(10000))
         # 划分训练集和验证集 (90%训练, 10%验证)
         raw_dataset_split = raw_dataset_dict.train_test_split(test_size=0.1, seed=42)
         raw_train_dataset = raw_dataset_split["train"]
@@ -125,7 +129,7 @@ def make_data_module(data_args, tokenizer, stage=1):
         random.seed(42)  # 设置随机种子
         # 原训练集处理代码
         mixed_train_dataset = []
-        lengths = [data_args.max_seq_len]
+        lengths = [data_args.stage1_max_seq_len if stage == 1 else data_args.stage2_max_seq_len]
         proportions = [1.0]
         for length, proportion in zip(lengths, proportions):
             sampled_dataset = raw_train_dataset.shuffle(seed=42).select(range(int(len(raw_train_dataset) * proportion)))
@@ -157,9 +161,9 @@ def make_data_module(data_args, tokenizer, stage=1):
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name_or_path", type=str, default="/raid_sdh/home/xyg/flare/output_qwen3b_redpajama_allrope")
-    parser.add_argument("--stage1_train_data_path", type=str, default="/raid_sdh/home/xyg/RedPajama/sample/documents/2023-06/0000/en_large.json.gz")
-    parser.add_argument("--stage2_train_data_path", type=str, default="/raid_sdh/home/xyg/RedPajama/sample/documents/2023-06/0000/en_task.json.gz")
+    parser.add_argument("--model_name_or_path", type=str, default="/raid_sdh/home/xyg/PRETRAINED_MODEL/qwen-3B")
+    parser.add_argument("--stage1_train_data_path", type=str, default="/raid_sdh/home/xyg/RedPajama/sample/documents/2023-06/0000/en_middle.json.gz")
+    parser.add_argument("--stage2_train_data_path", type=str, default="/raid_sdh/home/xyg/RedPajama/sample/documents/2023-06/0000/en_head.json.gz")
     parser.add_argument("--output_dir", type=str, default="./output_qwen3b_redpajama_allrope")
     parser.add_argument("--rope_theta", type=float, default=1000000.0)
     parser.add_argument("--no_rope_layers", type=int, nargs="*", default=[])
@@ -185,7 +189,7 @@ def main():
     # 长上下文：调整RoPE基频
     if hasattr(model.config, "rope_theta"):
         model.config.rope_theta = args.rope_theta
-    model.config.max_position_embeddings = args.max_seq_len
+    model.config.max_position_embeddings = args.stage2_max_seq_len
     model.config.nope_layers = args.no_rope_layers
     # ------------------- 阶段一：冻结预训练层，专攻新模块 -------------------
     print("\n===== 阶段一：冻结预训练层，专攻新模块 ======")
