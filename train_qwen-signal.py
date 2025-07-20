@@ -8,7 +8,7 @@
 """
 
 import os
-# os.environ['CUDA_VISIBLE_DEVICES'] = '2,3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import json
 import torch
 from dataclasses import dataclass, field
@@ -46,12 +46,16 @@ def make_data_module(data_args, tokenizer):
     # 检查是否存在已保存的处理后数据集
     if os.path.exists("./mixed_train_dataset"):
         mixed_train_dataset = Dataset.load_from_disk("./mixed_train_dataset")
+        mixed_eval_dataset = Dataset.load_from_disk("./mixed_eval_dataset")
         print("Loaded existing processed dataset from ./mixed_train_dataset")
     else:
         data_files = data_args.data_path
         print(f"Loading data from: {data_files}")
-        raw_dataset_dict = load_dataset("json", data_files=data_files, split="train")  # 递归加载所有压缩JSON文件(依赖扩展名自动解压)
-        train_dataset = raw_dataset_dict.select(range(1000))
+        raw_dataset_dict = load_dataset("json", data_files=data_files, split="train").select(range(10000))
+        # 划分训练集和验证集 (90%训练, 10%验证)
+        raw_dataset_split = raw_dataset_dict.train_test_split(test_size=0.1, seed=42)
+        raw_train_dataset = raw_dataset_split["train"]
+        raw_eval_dataset = raw_dataset_split["test"]
 
         def tokenize(example, max_length):
             tokens = tokenizer(
@@ -67,38 +71,47 @@ def make_data_module(data_args, tokenizer):
         # 按比例混合两种上下文长度
         import random
         random.seed(42)  # 设置随机种子
+        # 原训练集处理代码
         mixed_train_dataset = []
-        lengths = [data_args.max_seq_len]  # 固定长度
-        proportions = [1.0]  # 100%比例
+        lengths = [data_args.max_seq_len]
+        proportions = [1.0]
         for length, proportion in zip(lengths, proportions):
-            sampled_dataset = train_dataset.shuffle(seed=42).select(range(int(len(train_dataset) * proportion)))
+            sampled_dataset = raw_train_dataset.shuffle(seed=42).select(range(int(len(raw_train_dataset) * proportion)))
             sampled_dataset = sampled_dataset.map(lambda x: tokenize(x, length), num_proc=16).filter(lambda x: len(x["input_ids"]) > 0)
-
             mixed_train_dataset.extend(sampled_dataset)
-
-        # 将混合数据集转换为Dataset对象
         mixed_train_dataset = Dataset.from_list(mixed_train_dataset)
+        
+        # 添加验证集处理
+        mixed_eval_dataset = []
+        for length, proportion in zip(lengths, proportions):
+            sampled_dataset = raw_eval_dataset.shuffle(seed=42).select(range(int(len(raw_eval_dataset) * proportion)))
+            sampled_dataset = sampled_dataset.map(lambda x: tokenize(x, length), num_proc=16).filter(lambda x: len(x["input_ids"]) > 0)
+            mixed_eval_dataset.extend(sampled_dataset)
+        mixed_eval_dataset = Dataset.from_list(mixed_eval_dataset)
         mixed_train_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask'])
+        mixed_eval_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask'])
         mixed_train_dataset.save_to_disk("./mixed_train_dataset")
+        mixed_eval_dataset.save_to_disk("./mixed_eval_dataset")
         print("Saved processed dataset to ./mixed_train_dataset")
         
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
     return dict(
         train_dataset=mixed_train_dataset,
-        eval_dataset=None,
+        eval_dataset=mixed_eval_dataset,
         data_collator=data_collator,
     )
 # ----------- 4. 主函数 -----------
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name_or_path", type=str, default="/raid_sdh/home/xyg/PRETRAINED_MODEL/qwen-3B")
+    parser.add_argument("--model_name_or_path", type=str, default="/raid_sdh/home/xyg/flare/output_qwen3b_redpajama_allrope")
     parser.add_argument("--data_path", type=str, default="/raid_sdh/home/xyg/RedPajama/sample/documents/2023-06/0000/en_middle.json.gz")
     parser.add_argument("--max_seq_len", type=int, default=4096)
-    parser.add_argument("--output_dir", type=str, default="./output_qwen3b_redpajama_nope20~4k")
+    parser.add_argument("--output_dir", type=str, default="./output_qwen3b_redpajama_allrope")
     parser.add_argument("--rope_theta", type=float, default=1000000.0)
-    parser.add_argument("--no_rope_layers", type=int, nargs="*", default=list(range(20,34)))#list(range(20,34))
+    parser.add_argument("--no_rope_layers", type=int, nargs="*", default=[])
+#list(range(20,34))
     args = parser.parse_args()
 
     # 分词器
@@ -110,7 +123,8 @@ def main():
         args.model_name_or_path,
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
-        trust_remote_code=True
+        trust_remote_code=True,
+        device_map='auto'
     )
     patch_qwen_rope(model, no_rope_layers=args.no_rope_layers)
     # 长上下文：调整RoPE基频
@@ -125,27 +139,23 @@ def main():
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         overwrite_output_dir=True,
-        num_train_epochs=1,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=32,  # 1×32=32 samples/step
-        learning_rate=3e-5,
-        warmup_steps=100,
+        num_train_epochs=10,
+        per_device_train_batch_size=3,
+        gradient_accumulation_steps=16,  # 1×32=32 samples/step
+        eval_steps=2,
+        eval_on_start=True,
+        eval_strategy="steps",  
+        learning_rate=5e-5,
+        warmup_ratio=0.1,
         bf16=True,
         logging_steps=1,
         save_steps=100,
         save_total_limit=2,
         dataloader_num_workers=4,
-        max_steps=500,
+        max_steps=1000,
+        gradient_checkpointing=True,
         report_to="tensorboard",
-
-        fsdp="full_shard auto_wrap",
-        fsdp_config={
-            "min_num_params": 100000000,
-            "wrap_module": "QwenBlock",
-            "use_orig_params": True,
-            "activation_checkpointing": True,
-        },
-        optim="adamw_torch_fused",
+        resume_from_checkpoint=True, 
     )
 
     trainer = Trainer(

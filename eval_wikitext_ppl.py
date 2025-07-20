@@ -6,7 +6,7 @@ eval_wikitext_ppl.py
 import os
 
 from tqdm import tqdm
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 import math
 import torch
 import evaluate
@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 from transformers import DataCollatorForLanguageModeling
 from transformers import AutoTokenizer,AutoModelForCausalLM
 from patch_qwen_rope import patch_qwen_rope
+import json
 
 def create_token_segments(test_ds, tokenizer, max_len, stride):
     """
@@ -103,10 +104,8 @@ class WikiPPLCallback(TrainerCallback):
 
 
 if __name__ == '__main__':
-    model_path = '/raid_sdh/home/xyg/output_qwen3b_redpajama_nope_20-32'
-    # model_path = '/raid_sdh/home/xyg/output_qwen3b_redpajama_nope'
-    # model_path = '/raid_sdh/home/xyg/output_qwen3b_redpajama'
-    # model_path = '/raid_sdh/home/xyg/PRETRAINED_MODEL/qwen-3B'
+    model_path = '/raid_sdh/home/xyg/output_qwen3b_redpajama_nope-20~'
+    # model_path = '/raid_sdh/home/xyg/output_qwen3b_redpajama_allrope'
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
@@ -114,7 +113,21 @@ if __name__ == '__main__':
         trust_remote_code=True,
         device_map='auto'
     )
+    config_path = os.path.join(model_path, 'config.json')
+    print(f'Reading config from {config_path}')
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        print(f'Config file not found: {config_path}')
+    except json.JSONDecodeError as e:
+        print(f'Error decoding JSON from config file: {e}')
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    # patch_qwen_rope(model, no_rope_layers=list(range(20,31)))
+    print(f'Applying monkey patch with no_rope_layers: {config.get("nope_layers", [])}')
+    try:
+        # patch_qwen_rope(model, no_rope_layers=config.get('nope_layers', []))
+        pass
+    except Exception as e:
+        print(f'Error applying monkey patch: {e}')
     tokenizer.pad_token = tokenizer.eos_token
     print(compute_ppl(model,tokenizer,max_len=1024*16,batch_size=1))
