@@ -30,11 +30,23 @@ def set_freeze_layers(model, freeze=True):
     for param in model.parameters():
         param.requires_grad = not freeze
     # 解冻指定的nope_layers层
-    if hasattr(model.config, 'nope_layers') and model.config.nope_layers:
+    if model.config.nope_layers:
         for layer_idx in model.config.nope_layers:
-            if 0 <= layer_idx < len(model.model.layers):
-                for param in model.model.layers[layer_idx].parameters():
+            # 修正层访问路径并添加调试信息
+            if hasattr(model, 'model') and hasattr(model.model, 'layers'):
+                layers = model.model.layers
+            elif hasattr(model, 'layers'):
+                layers = model.layers
+            else:
+                raise AttributeError("Model has no layers attribute")
+            
+            if 0 <= layer_idx < len(layers):
+                print(f"解冻层 {layer_idx}")
+                for param in layers[layer_idx].parameters():
                     param.requires_grad = True
+                    print(f"  参数 {param.name}: requires_grad={param.requires_grad}")
+            else:
+                print(f"层索引 {layer_idx} 超出范围，总层数 {len(layers)}")
     return model
 
 # 添加早停回调
@@ -112,6 +124,9 @@ def make_data_module(data_args, tokenizer, stage=1):
         raw_dataset_split = raw_dataset_dict.train_test_split(test_size=0.1, seed=42)
         raw_train_dataset = raw_dataset_split["train"]
         raw_eval_dataset = raw_dataset_split["test"]
+        # 限制评估数据集大小以减少内存占用
+        eval_size_limit = 100
+        raw_eval_dataset = raw_eval_dataset.select(range(min(len(raw_eval_dataset), eval_size_limit)))
 
         def tokenize(example, max_length):
             tokens = tokenizer(
@@ -129,7 +144,8 @@ def make_data_module(data_args, tokenizer, stage=1):
         random.seed(42)  # 设置随机种子
         # 原训练集处理代码
         mixed_train_dataset = []
-        lengths = [data_args.stage1_max_seq_len if stage == 1 else data_args.stage2_max_seq_len]
+        # 评估阶段使用更短的序列长度减少内存占用
+        lengths = [max_seq_len]
         proportions = [1.0]
         for length, proportion in zip(lengths, proportions):
             sampled_dataset = raw_train_dataset.shuffle(seed=42).select(range(int(len(raw_train_dataset) * proportion)))
@@ -139,9 +155,10 @@ def make_data_module(data_args, tokenizer, stage=1):
         
         # 添加验证集处理
         mixed_eval_dataset = []
+        eval_max_seq_len = min(max_seq_len, 256)
         for length, proportion in zip(lengths, proportions):
             sampled_dataset = raw_eval_dataset.shuffle(seed=42).select(range(int(len(raw_eval_dataset) * proportion)))
-            sampled_dataset = sampled_dataset.map(lambda x: tokenize(x, length), num_proc=16).filter(lambda x: len(x["input_ids"]) > 0)
+            sampled_dataset = sampled_dataset.map(lambda x: tokenize(x, eval_max_seq_len), num_proc=16).filter(lambda x: len(x["input_ids"]) > 0)
             mixed_eval_dataset.extend(sampled_dataset)
         mixed_eval_dataset = Dataset.from_list(mixed_eval_dataset)
         mixed_train_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask'])
@@ -164,13 +181,14 @@ def main():
     parser.add_argument("--model_name_or_path", type=str, default="/raid_sdh/home/xyg/PRETRAINED_MODEL/qwen-3B")
     parser.add_argument("--stage1_train_data_path", type=str, default="/raid_sdh/home/xyg/RedPajama/sample/documents/2023-06/0000/en_middle.json.gz")
     parser.add_argument("--stage2_train_data_path", type=str, default="/raid_sdh/home/xyg/RedPajama/sample/documents/2023-06/0000/en_head.json.gz")
-    parser.add_argument("--output_dir", type=str, default="./output_qwen3b_redpajama_allrope")
+    parser.add_argument("--output_dir", type=str, default="./output_qwen3b_redpajama_somerope")
     parser.add_argument("--rope_theta", type=float, default=1000000.0)
-    parser.add_argument("--no_rope_layers", type=int, nargs="*", default=[])
+    parser.add_argument("--stage", type=int, help="Training stage (1 or 2)",default=2)
+    parser.add_argument("--no_rope_layers", type=int, nargs="*", default=list(range(20,34)))
     parser.add_argument("--stage1_dataset_size", type=int, default=100000)
     parser.add_argument("--stage2_dataset_size", type=int, default=10000)
-    parser.add_argument("--stage1_max_seq_len", type=int, default=8192)
-    parser.add_argument("--stage2_max_seq_len", type=int, default=32768)
+    parser.add_argument("--stage1_max_seq_len", type=int, default=4096)
+    parser.add_argument("--stage2_max_seq_len", type=int, default=4096)
     args = parser.parse_args()
 
     # 分词器
@@ -178,23 +196,30 @@ def main():
     tokenizer.pad_token = tokenizer.eos_token
 
     # 模型
+    import torch
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
-        torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
         trust_remote_code=True,
-        device_map='auto'
+        device_map='balanced',
+        torch_dtype=torch.bfloat16,
     )
     patch_qwen_rope(model, no_rope_layers=args.no_rope_layers)
     # 长上下文：调整RoPE基频
     if hasattr(model.config, "rope_theta"):
         model.config.rope_theta = args.rope_theta
-    model.config.max_position_embeddings = args.stage2_max_seq_len
+    # 根据评估阶段动态调整位置嵌入大小
+    eval_max_seq_len = min(args.stage2_max_seq_len, 256)
+    model.config.max_position_embeddings = args.stage1_max_seq_len
     model.config.nope_layers = args.no_rope_layers
     # ------------------- 阶段一：冻结预训练层，专攻新模块 -------------------
     print("\n===== 阶段一：冻结预训练层，专攻新模块 ======")
     # 冻结预训练层
     model = set_freeze_layers(model, freeze=True)
+    # 调试：打印可训练参数数量
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"可训练参数: {trainable_params}/{total_params} ({trainable_params/total_params:.2%})")
     # 阶段一数据
     data_module_stage1 = make_data_module(args, tokenizer, stage=1)
 
@@ -205,33 +230,49 @@ def main():
         num_train_epochs=5,
         per_device_train_batch_size=3,
         gradient_accumulation_steps=16,
+        per_device_eval_batch_size=1,
+        gradient_checkpointing=False,
+        prediction_loss_only=False,  # 禁用仅返回损失模式，确保梯度传播
+        # 添加调试：检查损失梯度
+        logging_first_step=True,
+        eval_accumulation_steps=1,
         eval_steps=50,
         eval_on_start=True,
         eval_strategy="steps",  
-        learning_rate=3e-4,  # 阶段一：较高学习率
+        learning_rate=1e-4,  # 阶段一：较高学习率
         warmup_ratio=0.1,
-        bf16=True,
-        logging_steps=10,
+        bf16=True,  # 切换为bf16以匹配模型bfloat16数据类型
+        logging_steps=1,
         save_steps=100,
         save_total_limit=2,
         dataloader_num_workers=4,
-        max_steps=500,  # 阶段一：较少步数
-        gradient_checkpointing=True,
+        max_steps=1000,  # 阶段一：较少步数
         report_to="tensorboard",
         resume_from_checkpoint=False, 
     )
 
     # 添加早停回调
-    early_stopping_callback = EarlyStoppingCallback(patience=3)
+    early_stopping_callback = EarlyStoppingCallback(patience=5)
+
+    # 添加评估前清理CUDA缓存的回调
+    from transformers import TrainerCallback
+    import torch
+
+    class CudaCacheClearCallback(TrainerCallback):
+        def on_evaluate(self, args, state, control,** kwargs):
+            torch.cuda.empty_cache()
 
     trainer_stage1 = Trainer(
         model=model,
         processing_class=tokenizer,
         args=training_args_stage1,
-        callbacks=[early_stopping_callback],
+        callbacks=[CudaCacheClearCallback()],
         **data_module_stage1,
     )
 
+    # 训练前清理CUDA缓存释放内存
+    import torch
+    torch.cuda.empty_cache()
     trainer_stage1.train()
     trainer_stage1.save_model(f"{args.output_dir}/stage1")
 
@@ -247,7 +288,7 @@ def main():
         output_dir=f"{args.output_dir}/stage2",
         overwrite_output_dir=True,
         num_train_epochs=10,
-        per_device_train_batch_size=3,
+        per_device_train_batch_size=2,
         gradient_accumulation_steps=16,
         eval_steps=20,
         eval_on_start=True,
@@ -255,11 +296,11 @@ def main():
         learning_rate=3e-5,  # 阶段二：非常低的学习率
         warmup_ratio=0.1,
         bf16=True,
-        logging_steps=10,
+        logging_steps=1,
         save_steps=50,
         save_total_limit=2,
         dataloader_num_workers=4,
-        max_steps=1000,  # 阶段二：较多步数
+        max_steps=2000,  # 阶段二：较多步数
         gradient_checkpointing=True,
         report_to="tensorboard",
         resume_from_checkpoint=False, 
@@ -269,7 +310,7 @@ def main():
         model=model,
         processing_class=tokenizer,
         args=training_args_stage2,
-        callbacks=[early_stopping_callback],
+        callbacks=[early_stopping_callback, CudaCacheClearCallback()],
         **data_module_stage2,
     )
 
