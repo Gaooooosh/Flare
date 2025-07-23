@@ -60,7 +60,7 @@ def process_instruct_prompts(prompt, model_path):
             return f"<|start_header_id|><|system|><|end_header_id|>According to the questions, answer question with options (A,B,C or D), then give the answers with only the Options, in one word.<|eot_id|><|start_header_id|><|user|><|end_header_id|>{prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>The Answers is:"
         elif "qwen" in model_path.lower():
             return f"<|im_start|>system\n<|im_end|>According to the questions, answer question with options (A,B,C or D), then give the answers with only the Options, in one word.\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\nThe Answers is:"
-    return f"{prompt}\nThe Answers is:"
+    return f"According to the questions, answer question with options (A,B,C or D), then give the answers with only the Options, in one word.\n{prompt}\nThe Answers is:"
 
 def evaluate_multiple_choice(model, tokenizer, dataset, args, logger):
     results = []
@@ -132,10 +132,10 @@ def evaluate_multiple_choice(model, tokenizer, dataset, args, logger):
             batch_results.append(result)
         
         results.extend(batch_results)
+        correct += batch_correct
         total += len(batch_results)
-        accuracy = batch_correct / len(batch_results) if len(batch_results) > 0 else 0
-        logger.log(f"Batch[{idx}]:finished,ACC:{accuracy}")
-    return results, accuracy, total
+    overall_accuracy = correct / total if total > 0 else 0
+    return results, overall_accuracy, total
 
 def main():
     args = parse_args()

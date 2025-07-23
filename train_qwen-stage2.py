@@ -181,10 +181,10 @@ def main():
     parser.add_argument("--model_name_or_path", type=str, default="/raid_sdh/home/xyg/PRETRAINED_MODEL/qwen-3B")
     parser.add_argument("--stage1_train_data_path", type=str, default="/raid_sdh/home/xyg/RedPajama/sample/documents/2023-06/0000/en_middle.json.gz")
     parser.add_argument("--stage2_train_data_path", type=str, default="/raid_sdh/home/xyg/RedPajama/sample/documents/2023-06/0000/en_head.json.gz")
-    parser.add_argument("--output_dir", type=str, default="./output_qwen3b_redpajama_somerope[20-32]")
+    parser.add_argument("--output_dir", type=str, default="./output_qwen3b_redpajama_allrope")
     parser.add_argument("--rope_theta", type=float, default=1000000.0)
     parser.add_argument("--stage", type=int, help="Training stage (1 or 2)",default=2)
-    parser.add_argument("--no_rope_layers", type=int, nargs="*", default=list(range(20,33)))
+    parser.add_argument("--no_rope_layers", type=int, nargs="*", default=[])#list(range(20,34))
     parser.add_argument("--stage1_dataset_size", type=int, default=100000)
     parser.add_argument("--stage2_dataset_size", type=int, default=10000)
     parser.add_argument("--stage1_max_seq_len", type=int, default=4096)
@@ -204,7 +204,7 @@ def main():
         device_map='balanced',
         torch_dtype=torch.bfloat16,
     )
-    patch_qwen_rope(model, no_rope_layers=args.no_rope_layers)
+    # patch_qwen_rope(model, no_rope_layers=args.no_rope_layers)
     # 长上下文：调整RoPE基频
     if hasattr(model.config, "rope_theta"):
         model.config.rope_theta = args.rope_theta
@@ -212,47 +212,6 @@ def main():
     eval_max_seq_len = min(args.stage2_max_seq_len, 256)
     model.config.max_position_embeddings = args.stage1_max_seq_len
     model.config.nope_layers = args.no_rope_layers
-    # ------------------- 阶段一：冻结预训练层，专攻新模块 -------------------
-    print("\n===== 阶段一：冻结预训练层，专攻新模块 ======")
-    # 冻结预训练层
-    model = set_freeze_layers(model, freeze=True)
-    # 调试：打印可训练参数数量
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"可训练参数: {trainable_params}/{total_params} ({trainable_params/total_params:.2%})")
-    # 阶段一数据
-    data_module_stage1 = make_data_module(args, tokenizer, stage=1)
-
-    # 阶段一训练参数
-    training_args_stage1 = TrainingArguments(
-        output_dir=f"{args.output_dir}/stage1",
-        overwrite_output_dir=True,
-        num_train_epochs=5,
-        per_device_train_batch_size=3,
-        gradient_accumulation_steps=16,
-        per_device_eval_batch_size=1,
-        gradient_checkpointing=False,
-        prediction_loss_only=False,  # 禁用仅返回损失模式，确保梯度传播
-        # 添加调试：检查损失梯度
-        logging_first_step=True,
-        eval_accumulation_steps=1,
-        eval_steps=50,
-        eval_on_start=True,
-        eval_strategy="steps",  
-        learning_rate=1e-4,  # 阶段一：较高学习率
-        warmup_ratio=0.1,
-        bf16=True,  # 切换为bf16以匹配模型bfloat16数据类型
-        logging_steps=1,
-        save_steps=100,
-        save_total_limit=2,
-        dataloader_num_workers=4,
-        max_steps=1000,  # 阶段一：较少步数
-        report_to="tensorboard",
-        resume_from_checkpoint=False, 
-    )
-
-    # 添加早停回调
-    early_stopping_callback = EarlyStoppingCallback(patience=5)
 
     # 添加评估前清理CUDA缓存的回调
     from transformers import TrainerCallback
@@ -262,24 +221,16 @@ def main():
         def on_evaluate(self, args, state, control,** kwargs):
             torch.cuda.empty_cache()
 
-    trainer_stage1 = Trainer(
-        model=model,
-        processing_class=tokenizer,
-        args=training_args_stage1,
-        callbacks=[CudaCacheClearCallback()],
-        **data_module_stage1,
-    )
-
-    # 训练前清理CUDA缓存释放内存
-    import torch
-    torch.cuda.empty_cache()
-    trainer_stage1.train()
-    trainer_stage1.save_model(f"{args.output_dir}/stage1")
-
     # ------------------- 阶段二：解冻全模型，整体微调 -------------------
     print("\n===== 阶段二：解冻全模型，整体微调 ======")
     # 解冻所有层
     model = set_freeze_layers(model, freeze=False)
+        # 调试：打印可训练参数数量
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"可训练参数: {trainable_params}/{total_params} ({trainable_params/total_params:.2%})")
+    # 添加早停回调
+    early_stopping_callback = EarlyStoppingCallback(patience=5)
     # 阶段二数据
     data_module_stage2 = make_data_module(args, tokenizer, stage=2)
 

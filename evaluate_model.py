@@ -19,6 +19,7 @@ from niah_probe import NIAHProbe
 from patch_qwen_rope import patch_qwen_rope
 from datasets import load_dataset
 from tqdm import tqdm
+import random
 # 定义评估参数的数据类
 @dataclass
 class EvaluationArguments:
@@ -68,13 +69,15 @@ def evaluate_model(eval_args):
         return
 
     # 加载数据集
-    raw_dataset_dict = load_dataset(eval_args.data_path, split="train")
-    eval_dataset = raw_dataset_dict.select(range(10))
+    data_files = eval_args.data_path
+    print(f"Loading data from: {data_files}")
+    raw_dataset = load_dataset("json", data_files=data_files, split="train")
+    eval_dataset = raw_dataset.select(range(10))
 
     # 插入magic number到每个样本的指定深度
-    MAGIC_NUMBER = 12345  # 定义magic number作为探针
+    MAGIC_NUMBER = random.randint(10000, 99999)  # 定义magic number作为探针
     # 截断原始文本到固定长度，然后插入magic number
-    eval_dataset = eval_dataset.map(lambda x: {"text": f"请找出这段文本中的magic number：{x['text'][:eval_args.probe_position]} magic number:{MAGIC_NUMBER} {x['text'][eval_args.probe_position:eval_args.fixed_text_length]} The magic number is:"})
+    eval_dataset = eval_dataset.map(lambda x: {"text": f"请找出这段文本中的magic number：{x.get('raw_content', x.get('content', x.get('document', '')))[:eval_args.probe_position]} magic number:{MAGIC_NUMBER} {x.get('raw_content', x.get('content', x.get('document', '')))[eval_args.probe_position:eval_args.fixed_text_length]} The magic number is:"})
 
     # 初始化探针（将magic number转换为token ID用于检测）
     magic_token_id = tokenizer(str(MAGIC_NUMBER), add_special_tokens=False)['input_ids'][0]
@@ -108,15 +111,27 @@ def evaluate_model(eval_args):
         
         for batch in tqdm(eval_dataset):
             input_ids = batch['input_ids'].unsqueeze(0).to(model.device)
+            mask = batch['attention_mask'].unsqueeze(0).to(model.device)
             attention_scores = probe.get_attention_scores(input_ids)
             # 生成模型回答
             outputs = model.generate(
                 input_ids,
+                attention_mask=mask,
                 max_new_tokens=50,
-                do_sample=False
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id
             )
-            generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-            print(generated_text)
+            generated_text = tokenizer.decode(outputs[0][input_ids.shape[1]:], skip_special_tokens=True)
+            # print(generated_text)
+            # 记录输入样本和模型响应到JSON日志文件
+            original_text = tokenizer.decode(batch['input_ids'], skip_special_tokens=True)
+            log_entry = {
+                "input": original_text,
+                "response": generated_text
+            }
+            with open("model_responses.jsonl", "a", encoding="utf-8") as f:
+                json.dump(log_entry, f, ensure_ascii=False)
+                f.write("\n")
             # 提取预测的magic number
             predicted_num = None
             match = re.search(r'\b\d+\b', generated_text)
@@ -124,7 +139,7 @@ def evaluate_model(eval_args):
                 predicted_num = int(match.group())
 
             # 验证答案（假设样本中正确答案存储在sample['magic_number']）
-            expected_num = 12345
+            expected_num = MAGIC_NUMBER
             if expected_num is not None and predicted_num == expected_num:
                 correct_predictions += 1
             total_predictions += 1
@@ -191,11 +206,11 @@ def evaluate_model(eval_args):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name_or_path", type=str, default="/raid_sdh/home/xyg/output_qwen3b_redpajama_nope-20~")
-    parser.add_argument("--data_path", type=str, default="/raid_sdh/home/xyg/RedPajama")
-    parser.add_argument("--max_seq_len", type=int, default=32768)
-    parser.add_argument("--probe_position", type=int, default=16000)  # 合并probe_position功能
-    parser.add_argument("--fixed_text_length", type=int, default=32768, help="固定测试文本的长度")
+    parser.add_argument("--model_name_or_path", type=str, default="/raid_sdh/home/xyg/output_qwen3b_redpajama_allrope")
+    parser.add_argument("--data_path", type=str, default="/raid_sdh/home/xyg/RedPajama/sample/documents/2023-06/0003/en_middle.json.gz")
+    parser.add_argument("--max_seq_len", type=int, default=4096)
+    parser.add_argument("--probe_position", type=int, default=2048)  # 合并probe_position功能
+    parser.add_argument("--fixed_text_length", type=int, default=4096, help="固定测试文本的长度")
     args = parser.parse_args()
 
     evaluate_model(args)

@@ -6,17 +6,19 @@ sns.set_style("whitegrid")
 plt.rcParams["figure.figsize"] = (15, 10)
 
 # 读取数据文件
-file1 = "/raid_sdh/home/xyg/flare/attention_scores-allrope.csv"
-file2 = "/raid_sdh/home/xyg/flare/attention_scores.csv"
-
+file1 = "/raid_sdh/home/xyg/attention_scores-qwen2.5.csv"
+file2 = "/raid_sdh/home/xyg/attention_scores-allrope.csv"
+fill3 = "/raid_sdh/home/xyg/attention_scores-somerope.csv"
 df1 = pd.read_csv(file1)
 df2 = pd.read_csv(file2)
+df3 = pd.read_csv(fill3)
 
 df1['Model'] = 'Baseline'
-df2['Model'] = 'SomeRoPE'
+df2['Model'] = 'AllRoPE'
+df3['Model'] = 'SomeRoPE'
 
 # 合并数据以便对比
-combined_df = pd.concat([df1, df2])
+combined_df = pd.concat([df1, df2, df3])
 
 # 创建子图
 fig, axes = plt.subplots(2, 2, sharex=True)

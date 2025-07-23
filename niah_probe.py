@@ -53,8 +53,8 @@ class NIAHProbe:
             
             # 分类计算注意力分数
             if 0 <= magic_position < len(layer_scores):
-                  probe_start = max(0, magic_position - self.probe_position // 2)
-                  probe_end = min(len(layer_scores), magic_position + self.probe_position // 2 + 1)
+                  probe_start = max(0, magic_position - 5)
+                  probe_end = min(len(layer_scores), magic_position + 5)
                   layer_data = {
                       "sink": layer_scores[:10],  # 前10个token (sink tokens)
                       "probe": layer_scores[probe_start:probe_end],  # 探针区域（围绕magic token）
@@ -62,12 +62,25 @@ class NIAHProbe:
                       "magic": [layer_scores[magic_position]]  # magic token自身分数
                   }
             else:
-                  # 没有找到magic token时使用原始划分
-                  layer_data = {
-                      "sink": layer_scores[:10],  # 前10个token (sink tokens)
-                      "probe": layer_scores[10:10+self.probe_position],  # 探针token
-                      "other": layer_scores[10+self.probe_position:]  # 其他无关token
-                  }
+                  # 没有找到magic token时使用动态划分
+                  if len(layer_scores) > 20 + self.probe_position:
+                      # 使用中间区域作为探针（避开前10个sink token）
+                      probe_start = (len(layer_scores) - self.probe_position) // 2
+                      probe_end = probe_start + self.probe_position
+                      layer_data = {
+                          "sink": layer_scores[:10],  # 前10个token (sink tokens)
+                          "probe": layer_scores[probe_start:probe_end],  # 中间区域作为探针
+                          "other": [score for i, score in enumerate(layer_scores) if (i < probe_start or i >= probe_end) and i >= 10],  # 排除sink和probe的其他token
+                          "magic": []  # 无magic token
+                      }
+                  else:
+                      # 输入过短时使用原始划分
+                      layer_data = {
+                          "sink": layer_scores[:10],
+                          "probe": layer_scores[10:10+self.probe_position],
+                          "other": layer_scores[10+self.probe_position:],
+                          "magic": []
+                      }
             
             attention_scores[layer_idx] = layer_data
             
