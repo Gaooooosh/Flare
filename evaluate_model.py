@@ -206,7 +206,7 @@ def evaluate_model(eval_args):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name_or_path", type=str, default="/raid_sdh/home/xyg/output_qwen3b_redpajama_allrope")
+    parser.add_argument("--model_name_or_path", type=str, default="/raid_sdh/home/xyg/output_qwen3b_redpajama_somerope[20-32]")
     parser.add_argument("--data_path", type=str, default="/raid_sdh/home/xyg/RedPajama/sample/documents/2023-06/0003/en_middle.json.gz")
     parser.add_argument("--max_seq_len", type=int, default=4096)
     parser.add_argument("--probe_position", type=int, default=2048)  # 合并probe_position功能
