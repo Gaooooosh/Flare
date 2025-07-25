@@ -20,7 +20,7 @@ def parse_args():
     parser.add_argument("--use_flash_attn", action="store_true", help="是否使用Flash Attention 2")
     parser.add_argument("--greedy", action="store_true", help="是否使用贪婪解码")
     parser.add_argument("--max_samples", type=int, default=-1, help="每个任务使用的最大样本数，-1表示使用全部")
-    parser.add_argument("--batch_size", type=int, default=10, help="批处理大小")
+    parser.add_argument("--batch_size", type=int, default=8, help="批处理大小")
     parser.add_argument("--mmlu_path", type=str, default="/raid_sdh/home/xyg/mmlu", help="MMLU数据集的本地路径")
     return parser.parse_args()
 
@@ -171,7 +171,7 @@ def main():
         attn_implementation="eager",
         trust_remote_code=True,
           output_attentions=True,
-        device_map='cuda:0'
+        device_map=device_map
     )
     
     config_path = os.path.join(args.model_path, 'config.json')
