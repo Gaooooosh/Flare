@@ -165,6 +165,9 @@ class MigrationTester:
         try:
             # 导入GPU管理器
             sys.path.insert(0, str(self.base_dir))
+            import sys
+            import os
+            sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'training'))
             from train_qwen_multi_gpu import GPUManager
             
             gpu_info = GPUManager.get_available_gpus()
@@ -212,6 +215,9 @@ class MigrationTester:
         """测试RoPE修改功能"""
         try:
             sys.path.insert(0, str(self.base_dir))
+            import sys
+            import os
+            sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
             from patch_qwen_rope import patch_qwen_rope
             
             # 检查函数是否可调用

@@ -112,15 +112,60 @@ watch -n 1 nvidia-smi
 
 ### 1. GPU配置
 
+#### 🎯 手动选择GPU
+
 ```bash
-# 指定特定GPU
+# 方法1: 使用启动脚本指定GPU
+./run_training.sh 1 manual my_experiment "0,1,2,3"
+
+# 方法2: 直接在Python脚本中指定
 python train_qwen_multi_gpu.py --gpu_ids 0 1 2 3
 
-# 指定GPU类型偏好
-python train_qwen_multi_gpu.py --gpu_type A800
+# 方法3: 单GPU训练
+python train_qwen_multi_gpu.py --gpu_ids 0
 
-# 自动选择可用GPU
+# 方法4: 使用混合GPU（A800+A40）
+python train_qwen_multi_gpu.py --gpu_ids 0 1 4 5
+```
+
+#### 🔍 按类型选择GPU
+
+```bash
+# 仅使用A800 GPU
+python train_qwen_multi_gpu.py --gpu_type A800
+./run_training.sh 1 A800 my_experiment
+
+# 仅使用A40 GPU
+python train_qwen_multi_gpu.py --gpu_type A40
+./run_training.sh 1 A40 my_experiment
+
+# 自动选择所有可用GPU
 python train_qwen_multi_gpu.py --gpu_type auto
+./run_training.sh 1 auto my_experiment
+```
+
+#### 📊 当前服务器GPU布局
+
+根据系统检测，当前服务器GPU配置：
+- **GPU 0-3**: NVIDIA A800 80GB PCIe (高内存)
+- **GPU 4-7**: NVIDIA A40 (标准内存)
+
+**推荐使用策略**：
+- 大模型/长序列：优先使用A800 (0-3)
+- 多实验并行：分组使用，避免资源冲突
+- 调试测试：使用单个GPU
+
+#### ⚙️ 配置文件方式
+
+参考 `training_config_gpu_examples.json` 查看详细配置示例：
+
+```json
+{
+  "training_args": {
+    "gpu_ids": [0, 1, 2, 3],  // 手动指定GPU
+    "gpu_type": null          // 或指定类型如"A800"
+  }
+}
 ```
 
 ### 2. 数据集配置

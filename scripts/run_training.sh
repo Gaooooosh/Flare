@@ -2,8 +2,11 @@
 
 # Qwen多卡训练启动脚本
 # 使用方法：
-# ./run_training.sh [stage] [gpu_type] [experiment_name]
-# 例如：./run_training.sh 1 A800 qwen_experiment_001
+# ./run_training.sh [stage] [gpu_type] [experiment_name] [gpu_ids]
+# 例如：
+#   ./run_training.sh 1 A800 qwen_experiment_001
+#   ./run_training.sh 1 auto qwen_experiment_001 "0,1,2,3"
+#   ./run_training.sh 2 manual qwen_experiment_001 "4,5,6,7"
 
 set -e
 
@@ -11,8 +14,9 @@ set -e
 STAGE=${1:-1}
 GPU_TYPE=${2:-"auto"}
 EXPERIMENT_NAME=${3:-"qwen_training_$(date +%Y%m%d_%H%M%S)"}
+GPU_IDS=${4:-""}
 BASE_OUTPUT_DIR="/work/xiaoyonggao"
-CONFIG_FILE="training_config.json"
+# CONFIG_FILE将在脚本中动态设置
 
 # 颜色输出
 RED='\033[0;31m'
@@ -24,6 +28,9 @@ NC='\033[0m' # No Color
 echo -e "${BLUE}=== Qwen多卡训练启动脚本 ===${NC}"
 echo -e "${GREEN}训练阶段: ${STAGE}${NC}"
 echo -e "${GREEN}GPU类型: ${GPU_TYPE}${NC}"
+if [ -n "$GPU_IDS" ]; then
+    echo -e "${GREEN}指定GPU: ${GPU_IDS}${NC}"
+fi
 echo -e "${GREEN}实验名称: ${EXPERIMENT_NAME}${NC}"
 echo -e "${GREEN}输出目录: ${BASE_OUTPUT_DIR}/${EXPERIMENT_NAME}${NC}"
 echo ""
@@ -34,20 +41,24 @@ if ! command -v python &> /dev/null; then
     exit 1
 fi
 
+# 获取脚本所在目录
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
 # 检查必要的文件
-if [ ! -f "train_qwen_multi_gpu.py" ]; then
+if [ ! -f "$PROJECT_ROOT/training/train_qwen_multi_gpu.py" ]; then
     echo -e "${RED}错误: 找不到训练脚本 train_qwen_multi_gpu.py${NC}"
     exit 1
 fi
 
-if [ ! -f "patch_qwen_rope.py" ]; then
+if [ ! -f "$PROJECT_ROOT/utils/patch_qwen_rope.py" ]; then
     echo -e "${RED}错误: 找不到模型修改脚本 patch_qwen_rope.py${NC}"
     exit 1
 fi
 
 # 检查配置文件
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo -e "${YELLOW}警告: 找不到配置文件 $CONFIG_FILE，将使用默认参数${NC}"
+if [ ! -f "$PROJECT_ROOT/configs/training_config.json" ]; then
+    echo -e "${YELLOW}警告: 找不到配置文件 training_config.json，将使用默认参数${NC}"
 fi
 
 # 创建输出目录
@@ -69,7 +80,7 @@ else:
 "
 
 # 构建训练命令
-TRAIN_CMD="python train_qwen_multi_gpu.py"
+TRAIN_CMD="python $PROJECT_ROOT/training/train_qwen_multi_gpu.py"
 
 # 添加基本参数
 TRAIN_CMD="$TRAIN_CMD --stage $STAGE"
@@ -78,8 +89,16 @@ TRAIN_CMD="$TRAIN_CMD --experiment_name $EXPERIMENT_NAME"
 TRAIN_CMD="$TRAIN_CMD --enable_tensorboard"
 
 # 添加GPU类型参数
-if [ "$GPU_TYPE" != "auto" ]; then
+if [ "$GPU_TYPE" != "auto" ] && [ "$GPU_TYPE" != "manual" ]; then
     TRAIN_CMD="$TRAIN_CMD --gpu_type $GPU_TYPE"
+fi
+
+# 添加GPU ID参数
+if [ -n "$GPU_IDS" ]; then
+    # 将逗号分隔的字符串转换为Python列表格式
+    GPU_LIST=$(echo "$GPU_IDS" | sed 's/,/ /g')
+    TRAIN_CMD="$TRAIN_CMD --gpu_ids $GPU_LIST"
+    echo -e "${YELLOW}使用指定GPU: $GPU_IDS${NC}"
 fi
 
 # 根据阶段调整参数
@@ -183,7 +202,7 @@ read -p "是否运行模型评估? (y/N): " -n 1 -r
 echo ""
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo -e "${GREEN}开始模型评估...${NC}"
-    EVAL_CMD="python evaluate_model_enhanced.py"
+    EVAL_CMD="python $PROJECT_ROOT/utils/evaluate_model_enhanced.py"
     EVAL_CMD="$EVAL_CMD --model_path ${OUTPUT_DIR}/final_model"
     EVAL_CMD="$EVAL_CMD --output_dir ${OUTPUT_DIR}/evaluation"
     EVAL_CMD="$EVAL_CMD --use_default_datasets"

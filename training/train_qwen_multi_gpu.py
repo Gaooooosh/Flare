@@ -36,6 +36,9 @@ from transformers import (
 from transformers.trainer_utils import get_last_checkpoint
 
 # 导入自定义模块
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
 from patch_qwen_rope import patch_qwen_rope
 
 # 设置日志
