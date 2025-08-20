@@ -16,6 +16,7 @@ import os
 import json
 import torch
 import logging
+import dataclasses
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from pathlib import Path
@@ -40,6 +41,10 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
 from patch_qwen_rope import patch_qwen_rope
+from dataset_loader import DatasetLoader, DatasetLoadingError
+from environment_adapter import EnvironmentAdapter
+from memory_optimizer import MemoryOptimizer
+from .error_handler import ErrorHandler, TrainingError, DatasetError, ModelError, EnvironmentError, MemoryError, error_handler_decorator, safe_execute, get_global_error_handler
 
 # 设置日志
 logging.basicConfig(
@@ -76,6 +81,10 @@ class ModelArguments:
     torch_dtype: str = field(
         default="bfloat16",
         metadata={"help": "模型数据类型：float16, bfloat16, float32"}
+    )
+    force_cpu: bool = field(
+        default=False,
+        metadata={"help": "强制使用CPU模式，即使有GPU可用"}
     )
 
 
@@ -248,11 +257,19 @@ class EarlyStoppingCallback(TrainerCallback):
 class MemoryOptimizationCallback(TrainerCallback):
     """内存优化回调"""
     
+    def __init__(self, memory_optimizer: MemoryOptimizer):
+        self.memory_optimizer = memory_optimizer
+    
     def on_evaluate(self, args, state, control, **kwargs):
-        torch.cuda.empty_cache()
+        self.memory_optimizer.cleanup_memory()
     
     def on_save(self, args, state, control, **kwargs):
-        torch.cuda.empty_cache()
+        self.memory_optimizer.cleanup_memory()
+    
+    def on_step_end(self, args, state, control, **kwargs):
+        # 每100步执行一次内存清理
+        if state.global_step % 100 == 0:
+            self.memory_optimizer.cleanup_memory()
 
 
 class PPLEvaluationCallback(TrainerCallback):
@@ -324,9 +341,15 @@ def setup_output_directory(base_dir: str, experiment_name: Optional[str] = None)
     return str(output_dir)
 
 
+@error_handler_decorator(get_global_error_handler(), reraise=True)
 def setup_model_and_tokenizer(model_args: ModelArguments, 
                               selected_gpus: List[int]) -> tuple:
     """设置模型和分词器"""
+    logger.info(f"加载模型: {model_args.model_name_or_path}")
+    
+    # 检查是否为CPU模式
+    use_cpu = len(selected_gpus) == 0 or model_args.force_cpu
+    
     # 分词器
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.model_name_or_path,
@@ -345,6 +368,11 @@ def setup_model_and_tokenizer(model_args: ModelArguments,
     }
     torch_dtype = dtype_mapping.get(model_args.torch_dtype, torch.bfloat16)
     
+    # CPU模式下强制使用float32
+    if use_cpu:
+        torch_dtype = torch.float32
+        logger.info("CPU模式：使用float32数据类型")
+    
     # 模型
     model_kwargs = {
         "trust_remote_code": True,
@@ -352,11 +380,14 @@ def setup_model_and_tokenizer(model_args: ModelArguments,
         "cache_dir": None
     }
     
-    if model_args.use_flash_attention:
+    # Flash Attention配置（仅在GPU模式下启用）
+    if model_args.use_flash_attention and not use_cpu:
         model_kwargs["attn_implementation"] = "flash_attention_2"
     
-    # 多GPU设备映射
-    if len(selected_gpus) > 1:
+    # 设备映射
+    if use_cpu:
+        model_kwargs["device_map"] = None
+    elif len(selected_gpus) > 1:
         model_kwargs["device_map"] = "auto"
     else:
         model_kwargs["device_map"] = {"":selected_gpus[0]}
@@ -365,6 +396,11 @@ def setup_model_and_tokenizer(model_args: ModelArguments,
         model_args.model_name_or_path,
         **model_kwargs
     )
+    
+    # CPU模式下移动模型到CPU
+    if use_cpu:
+        model = model.to('cpu')
+        logger.info("模型已移动到CPU")
     
     # 应用RoPE修改
     if model_args.no_rope_layers:
@@ -382,106 +418,71 @@ def setup_model_and_tokenizer(model_args: ModelArguments,
     return model, tokenizer
 
 
-def setup_datasets(data_args: DataArguments, tokenizer) -> Dict[str, Dataset]:
-    """设置数据集"""
-    logger.info(f"加载数据集: {data_args.dataset_name}")
-    
-    # 加载数据集
-    load_kwargs = {
-        "path": data_args.dataset_name,
-        "split": data_args.dataset_split,
-        "cache_dir": data_args.cache_dir
-    }
-    
-    if data_args.dataset_config:
-        load_kwargs["name"] = data_args.dataset_config
+@error_handler_decorator(get_global_error_handler(), reraise=True)
+def setup_datasets(data_args: DataArguments, tokenizer, use_cpu=False) -> Dict[str, Dataset]:
+    """设置数据集（使用新的DatasetLoader）"""
+    logger.info(f"使用DatasetLoader加载数据集: {data_args.dataset_name}")
     
     try:
-        raw_dataset = load_dataset(**load_kwargs)
-    except Exception as e:
-        logger.error(f"加载数据集失败: {e}")
-        # 回退到本地数据集或示例数据
-        logger.info("使用示例数据集")
-        raw_dataset = Dataset.from_dict({
-            "text": ["这是一个示例文本。" * 100] * 1000
-        })
-    
-    # 限制数据集大小
-    if data_args.dataset_size and len(raw_dataset) > data_args.dataset_size:
-        raw_dataset = raw_dataset.select(range(data_args.dataset_size))
-    
-    # 分割训练集和验证集
-    if data_args.validation_split_percentage > 0:
-        split_dataset = raw_dataset.train_test_split(
-            test_size=data_args.validation_split_percentage,
+        # 创建数据集加载器
+        dataset_loader = DatasetLoader(
+            cache_dir=data_args.cache_dir,
+            use_cpu=use_cpu
+        )
+        
+        # 加载数据集
+        dataset = dataset_loader.load_dataset_with_fallback(
+            dataset_name=data_args.dataset_name,
+            dataset_config=data_args.dataset_config,
+            dataset_split=data_args.dataset_split,
+            text_column=data_args.text_column,
+            max_samples=data_args.dataset_size
+        )
+        
+        # 分割数据集
+        train_dataset, eval_dataset = dataset_loader.split_dataset(
+            dataset=dataset,
+            validation_split_percentage=data_args.validation_split_percentage * 100,
             seed=42
         )
-        train_dataset = split_dataset["train"]
-        eval_dataset = split_dataset["test"]
-    else:
-        train_dataset = raw_dataset
-        eval_dataset = None
-    
-    # 数据预处理
-    def tokenize_function(examples):
-        # 尝试不同的文本列名
-        text_key = None
-        for key in [data_args.text_column, "text", "content", "document", "raw_content"]:
-            if key in examples:
-                text_key = key
-                break
         
-        if text_key is None:
-            raise ValueError(f"找不到文本列，可用列: {list(examples.keys())}")
-        
-        texts = examples[text_key]
-        
-        # 分词
-        tokenized = tokenizer(
-            texts,
-            truncation=True,
-            padding="max_length",
-            max_length=data_args.max_seq_length,
-            return_overflowing_tokens=False,
-        )
-        
-        return tokenized
-    
-    # 应用分词
-    train_dataset = train_dataset.map(
-        tokenize_function,
-        batched=True,
-        num_proc=data_args.preprocessing_num_workers,
-        remove_columns=train_dataset.column_names,
-        desc="分词训练数据"
-    )
-    
-    if eval_dataset is not None:
-        eval_dataset = eval_dataset.map(
-            tokenize_function,
-            batched=True,
+        # 预处理数据集
+        train_dataset = dataset_loader.preprocess_dataset(
+            dataset=train_dataset,
+            tokenizer=tokenizer,
+            text_column=data_args.text_column,
+            max_seq_length=data_args.max_seq_length,
             num_proc=data_args.preprocessing_num_workers,
-            remove_columns=eval_dataset.column_names,
-            desc="分词验证数据"
+            description="分词训练数据"
         )
         
-        # 限制验证集大小以节省内存
-        if len(eval_dataset) > 1000:
-            eval_dataset = eval_dataset.select(range(1000))
-    
-    # 过滤空样本
-    train_dataset = train_dataset.filter(lambda x: len(x["input_ids"]) > 0)
-    if eval_dataset is not None:
-        eval_dataset = eval_dataset.filter(lambda x: len(x["input_ids"]) > 0)
-    
-    logger.info(f"训练集大小: {len(train_dataset)}")
-    if eval_dataset is not None:
-        logger.info(f"验证集大小: {len(eval_dataset)}")
-    
-    return {
-        "train_dataset": train_dataset,
-        "eval_dataset": eval_dataset
-    }
+        if eval_dataset is not None:
+            eval_dataset = dataset_loader.preprocess_dataset(
+                dataset=eval_dataset,
+                tokenizer=tokenizer,
+                text_column=data_args.text_column,
+                max_seq_length=data_args.max_seq_length,
+                num_proc=data_args.preprocessing_num_workers,
+                description="分词验证数据"
+            )
+            
+            # 限制验证集大小以节省内存
+            if len(eval_dataset) > 1000:
+                eval_dataset = eval_dataset.select(range(1000))
+        
+        logger.info(f"数据集设置完成 - 训练集: {len(train_dataset)}, 验证集: {len(eval_dataset) if eval_dataset else 0}")
+        
+        return {
+            "train_dataset": train_dataset,
+            "eval_dataset": eval_dataset
+        }
+        
+    except DatasetLoadingError as e:
+        logger.error(f"数据集加载失败: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"数据集设置过程中发生未知错误: {e}")
+        raise DatasetLoadingError(f"数据集设置失败: {e}") from e
 
 
 def set_freeze_layers(model, freeze: bool = True, no_rope_layers: List[int] = None):
@@ -520,21 +521,133 @@ def set_freeze_layers(model, freeze: bool = True, no_rope_layers: List[int] = No
 def main():
     # 解析参数
     parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArgumentsExtended))
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     
-    # GPU选择和设置
-    selected_gpus = GPUManager.select_gpus(
-        gpu_type=training_args.gpu_type,
-        gpu_ids=training_args.gpu_ids
-    )
+    # 检查是否有配置文件参数
+    import sys
+    config_file = None
+    remaining_args = []
+    i = 0
+    while i < len(sys.argv):
+        if sys.argv[i] == "--config_file" and i + 1 < len(sys.argv):
+            config_file = sys.argv[i + 1]
+            i += 2  # 跳过config_file参数和其值
+        else:
+            remaining_args.append(sys.argv[i])
+            i += 1
     
-    logger.info(f"选择的GPU: {selected_gpus}")
-    
-    # 设置CUDA设备
-    if len(selected_gpus) == 1:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(selected_gpus[0])
+    if config_file and os.path.exists(config_file):
+        logger.info(f"从配置文件加载参数: {config_file}")
+        # 先从配置文件加载
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config_data = json.load(f)
+        
+        # 分别解析各个部分
+        model_args = ModelArguments(**config_data.get('model_args', {}))
+        data_args = DataArguments(**config_data.get('data_args', {}))
+        
+        # 处理training_args，转换旧的参数名
+        training_args_data = config_data.get('training_args', {})
+        if 'evaluation_strategy' in training_args_data:
+            training_args_data['eval_strategy'] = training_args_data.pop('evaluation_strategy')
+        
+        training_args = TrainingArgumentsExtended(**training_args_data)
+        
+        # 如果有额外的命令行参数，用它们覆盖配置文件参数
+        if len(remaining_args) > 1:  # remaining_args[0]是脚本名
+            logger.info("使用命令行参数覆盖配置文件参数")
+            # 临时修改sys.argv以便解析剩余参数
+            original_argv = sys.argv
+            sys.argv = remaining_args
+            try:
+                model_args_override, data_args_override, training_args_override = parser.parse_args_into_dataclasses()
+                # 合并参数（命令行参数优先）
+                for field in model_args.__dataclass_fields__:
+                    if hasattr(model_args_override, field):
+                        override_value = getattr(model_args_override, field)
+                        field_info = model_args.__dataclass_fields__[field]
+                        
+                        # 处理default_factory字段
+                        if field_info.default_factory is not dataclasses.MISSING:
+                            default_value = field_info.default_factory()
+                        else:
+                            default_value = field_info.default
+                        
+                        # 只有当命令行值与默认值不同时才覆盖
+                        if override_value != default_value:
+                            setattr(model_args, field, override_value)
+                
+                for field in data_args.__dataclass_fields__:
+                    if hasattr(data_args_override, field):
+                        override_value = getattr(data_args_override, field)
+                        field_info = data_args.__dataclass_fields__[field]
+                        
+                        # 处理default_factory字段
+                        if field_info.default_factory is not dataclasses.MISSING:
+                            default_value = field_info.default_factory()
+                        else:
+                            default_value = field_info.default
+                        
+                        # 只有当命令行值与默认值不同时才覆盖
+                        if override_value != default_value:
+                            setattr(data_args, field, override_value)
+                
+                for field in training_args.__dataclass_fields__:
+                    if hasattr(training_args_override, field):
+                        override_value = getattr(training_args_override, field)
+                        field_info = training_args.__dataclass_fields__[field]
+                        
+                        # 处理default_factory字段
+                        if field_info.default_factory is not dataclasses.MISSING:
+                            default_value = field_info.default_factory()
+                        else:
+                            default_value = field_info.default
+                        
+                        # 只有当命令行值与默认值不同时才覆盖
+                        if override_value != default_value:
+                            setattr(training_args, field, override_value)
+            finally:
+                sys.argv = original_argv
     else:
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, selected_gpus))
+        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    
+    # 初始化环境适配器
+    force_cpu = getattr(model_args, 'force_cpu', False)
+    env_adapter = EnvironmentAdapter(force_cpu=force_cpu)
+    
+    # 初始化内存优化器
+    memory_optimizer = MemoryOptimizer(use_cpu=env_adapter.env_info.use_cpu)
+    memory_optimizations = memory_optimizer.optimize_for_training()
+    logger.info(f"内存优化建议: {memory_optimizations}")
+    
+    # 根据环境和内存优化调整训练参数
+    training_args = env_adapter.adapt_training_args(training_args)
+    
+    # 应用内存优化建议
+    if 'recommended_batch_size' in memory_optimizations:
+        training_args.per_device_train_batch_size = memory_optimizations['recommended_batch_size']
+        training_args.per_device_eval_batch_size = memory_optimizations['recommended_batch_size']
+    if 'gradient_accumulation_steps' in memory_optimizations:
+        training_args.gradient_accumulation_steps = memory_optimizations['gradient_accumulation_steps']
+    if 'dataloader_num_workers' in memory_optimizations:
+        training_args.dataloader_num_workers = memory_optimizations['dataloader_num_workers']
+    
+    # GPU选择和设置（仅在非CPU模式下）
+    if not env_adapter.env_info.use_cpu:
+        selected_gpus = GPUManager.select_gpus(
+            gpu_type=training_args.gpu_type,
+            gpu_ids=training_args.gpu_ids
+        )
+        
+        logger.info(f"选择的GPU: {selected_gpus}")
+        
+        # 设置CUDA设备
+        if len(selected_gpus) == 1:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(selected_gpus[0])
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, selected_gpus))
+    else:
+        selected_gpus = []
+        logger.info("CPU模式：跳过GPU选择")
     
     # 设置输出目录
     output_dir = setup_output_directory(
@@ -551,11 +664,61 @@ def main():
     
     logger.info(f"输出目录: {output_dir}")
     
+    # 初始化错误处理器
+    error_log_file = output_dir / "error.log"
+    error_handler = ErrorHandler(log_file=str(error_log_file), enable_recovery=True)
+    
+    # 设置为全局错误处理器
+    from .error_handler import set_global_error_handler
+    set_global_error_handler(error_handler)
+    
+    logger.info(f"错误处理器已初始化，日志文件: {error_log_file}")
+    
+    # 根据环境调整模型配置
+    model_args = env_adapter.adapt_model_config(model_args)
+    
     # 设置模型和分词器
-    model, tokenizer = setup_model_and_tokenizer(model_args, selected_gpus)
+    logger.info("设置模型和分词器...")
+    try:
+        model, tokenizer = setup_model_and_tokenizer(model_args, selected_gpus)
+    except Exception as e:
+        model_error = ModelError(
+            f"模型设置失败: {str(e)}",
+            model_name=model_args.model_name_or_path,
+            context={'selected_gpus': selected_gpus}
+        )
+        if not error_handler.handle_error(model_error):
+            logger.critical("模型设置失败，无法继续训练")
+            raise
     
     # 设置数据集
-    datasets = setup_datasets(data_args, tokenizer)
+    logger.info("设置数据集...")
+    try:
+        datasets = setup_datasets(data_args, tokenizer, use_cpu=env_adapter.env_info.use_cpu)
+    except DatasetLoadingError as e:
+        dataset_error = DatasetError(
+            f"数据集设置失败: {str(e)}",
+            dataset_name=data_args.dataset_name,
+            context={'use_cpu': env_adapter.env_info.use_cpu}
+        )
+        if not error_handler.handle_error(dataset_error):
+            logger.critical("数据集设置失败，无法继续训练")
+            raise
+    except Exception as e:
+        dataset_error = DatasetError(
+            f"数据集设置过程中发生未知错误: {str(e)}",
+            dataset_name=data_args.dataset_name,
+            context={'use_cpu': env_adapter.env_info.use_cpu}
+        )
+        if not error_handler.handle_error(dataset_error):
+            logger.critical("数据集设置失败，无法继续训练")
+            raise
+    
+    # 如果没有评估数据集，禁用 load_best_model_at_end 以避免冲突
+    if datasets["eval_dataset"] is None:
+        logger.warning("没有评估数据集，禁用 load_best_model_at_end")
+        training_args.load_best_model_at_end = False
+        training_args.eval_strategy = "no"
     
     # 数据整理器
     data_collator = DataCollatorForLanguageModeling(
@@ -572,7 +735,7 @@ def main():
         model = set_freeze_layers(model, freeze=False)
     
     # 设置回调
-    callbacks = [MemoryOptimizationCallback()]
+    callbacks = [MemoryOptimizationCallback(memory_optimizer)]
     
     if training_args.early_stopping_patience > 0:
         callbacks.append(EarlyStoppingCallback(
@@ -607,9 +770,16 @@ def main():
     if checkpoint is not None:
         logger.info(f"从检查点恢复训练: {checkpoint}")
     
+    # 启动内存监控
+    memory_optimizer.start_monitoring()
+    
     # 开始训练
     logger.info("开始训练...")
-    train_result = trainer.train(resume_from_checkpoint=checkpoint)
+    try:
+        train_result = trainer.train(resume_from_checkpoint=checkpoint)
+    finally:
+        # 停止内存监控
+        memory_optimizer.stop_monitoring()
     
     # 保存最终模型
     final_model_dir = str(Path(output_dir) / "final_model")
@@ -621,8 +791,23 @@ def main():
     with open(metrics_file, "w", encoding="utf-8") as f:
         json.dump(train_result.metrics, f, indent=2, ensure_ascii=False)
     
+    # 保存内存使用报告
+    memory_optimizer.save_memory_report(output_dir)
+    
+    # 最终内存清理
+    memory_optimizer.cleanup_memory()
+    
+    # 保存错误报告
+    error_summary = error_handler.get_error_summary()
+    if error_summary['total_errors'] > 0:
+        error_handler.save_error_report(Path(output_dir) / "error_report.json")
+        logger.info(f"训练过程中发生了 {error_summary['total_errors']} 个错误，详细信息已保存到错误报告")
+    
     logger.info(f"训练完成！模型保存在: {final_model_dir}")
     logger.info(f"训练指标保存在: {metrics_file}")
+    logger.info(f"内存报告保存在: {Path(output_dir) / 'memory_report.json'}")
+    if error_summary['total_errors'] > 0:
+        logger.info(f"错误报告保存在: {Path(output_dir) / 'error_report.json'}")
 
 
 if __name__ == "__main__":

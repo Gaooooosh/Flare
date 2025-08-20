@@ -82,7 +82,16 @@ else:
 # 构建训练命令
 TRAIN_CMD="python $PROJECT_ROOT/training/train_qwen_multi_gpu.py"
 
-# 添加基本参数
+# 检查是否使用配置文件
+CONFIG_FILE="$PROJECT_ROOT/configs/training_config.json"
+if [ -f "$CONFIG_FILE" ]; then
+    echo -e "${GREEN}使用配置文件: $CONFIG_FILE${NC}"
+    TRAIN_CMD="$TRAIN_CMD --config_file $CONFIG_FILE"
+else
+    echo -e "${YELLOW}配置文件不存在，使用命令行参数${NC}"
+fi
+
+# 添加基本参数（这些参数会覆盖配置文件中的对应参数）
 TRAIN_CMD="$TRAIN_CMD --stage $STAGE"
 TRAIN_CMD="$TRAIN_CMD --base_output_dir $BASE_OUTPUT_DIR"
 TRAIN_CMD="$TRAIN_CMD --experiment_name $EXPERIMENT_NAME"
@@ -131,8 +140,9 @@ TRAIN_CMD="$TRAIN_CMD --logging_steps 10"
 TRAIN_CMD="$TRAIN_CMD --warmup_ratio 0.1"
 TRAIN_CMD="$TRAIN_CMD --weight_decay 0.01"
 TRAIN_CMD="$TRAIN_CMD --save_total_limit 3"
-TRAIN_CMD="$TRAIN_CMD --evaluation_strategy steps"
-TRAIN_CMD="$TRAIN_CMD --load_best_model_at_end"
+# 注意：evaluation_strategy和load_best_model_at_end将由训练脚本根据是否有验证集自动设置
+# 如果有验证集，会自动启用evaluation_strategy=steps和load_best_model_at_end=True
+# 如果没有验证集，会自动设置evaluation_strategy=no和load_best_model_at_end=False
 TRAIN_CMD="$TRAIN_CMD --metric_for_best_model eval_loss"
 TRAIN_CMD="$TRAIN_CMD --early_stopping_patience 3"
 

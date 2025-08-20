@@ -1,0 +1,8 @@
+/training-ui
+/training-ui/node_modules
+/docs
+/.venv
+/.python-version
+uv.lock
+PROJECT_STRUCTURE.md
+
