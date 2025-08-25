@@ -36,10 +36,20 @@ echo -e "${GREEN}输出目录: ${BASE_OUTPUT_DIR}/${EXPERIMENT_NAME}${NC}"
 echo ""
 
 # 检查Python环境
-if ! command -v python &> /dev/null; then
+if ! command -v python &> /dev/null && ! command -v python3 &> /dev/null; then
     echo -e "${RED}错误: 找不到Python解释器${NC}"
+    echo -e "${YELLOW}请确保已激活Python虚拟环境或安装了Python${NC}"
     exit 1
 fi
+
+# 设置Python命令
+if command -v python &> /dev/null; then
+    PYTHON_CMD="python"
+elif command -v python3 &> /dev/null; then
+    PYTHON_CMD="python3"
+fi
+
+echo -e "${GREEN}使用Python: $(which $PYTHON_CMD)${NC}"
 
 # 获取脚本所在目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,7 +90,7 @@ else:
 "
 
 # 构建训练命令
-TRAIN_CMD="python $PROJECT_ROOT/training/train_qwen_multi_gpu.py"
+TRAIN_CMD="$PYTHON_CMD $PROJECT_ROOT/training/train_qwen_multi_gpu.py"
 
 # 检查是否使用配置文件
 CONFIG_FILE="$PROJECT_ROOT/configs/training_config.json"
@@ -212,7 +222,7 @@ read -p "是否运行模型评估? (y/N): " -n 1 -r
 echo ""
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo -e "${GREEN}开始模型评估...${NC}"
-    EVAL_CMD="python $PROJECT_ROOT/utils/evaluate_model_enhanced.py"
+    EVAL_CMD="$PYTHON_CMD $PROJECT_ROOT/utils/evaluate_model_enhanced.py"
     EVAL_CMD="$EVAL_CMD --model_path ${OUTPUT_DIR}/final_model"
     EVAL_CMD="$EVAL_CMD --output_dir ${OUTPUT_DIR}/evaluation"
     EVAL_CMD="$EVAL_CMD --use_default_datasets"

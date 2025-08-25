@@ -14,9 +14,16 @@
     "text_column": "text",
     "max_seq_length": 8192,
     "preprocessing_num_workers": 16,
-    "dataset_size": 100000,
+    "dataset_size": 10000,
     "validation_split_percentage": 0.1,
-    "cache_dir": null
+    "cache_dir": null,
+    "dynamic_length_batching": true,
+    "long_text_segmentation": "none",
+    "segment_stride": null,
+    "mixed_seq_lengths": null,
+    "mixed_seq_probs": null,
+    "adjust_seq_length_by_memory": true,
+    "min_seq_length": 512
   },
   "training_args": {
     "stage": 1,
@@ -86,7 +93,8 @@
     "use_ipex": false,
     "use_cpu": false,
     "disable_tqdm": false,
-    "remove_unused_columns": false
+    "remove_unused_columns": false,
+    "pad_to_multiple_of": 8
   },
   "stage_configs": {
     "stage1": {

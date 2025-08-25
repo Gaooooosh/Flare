@@ -9,6 +9,7 @@ import logging
 from typing import Dict, List, Optional, Union, Any
 from pathlib import Path
 import json
+import random
 import torch
 from datasets import load_dataset, Dataset, DatasetDict
 from transformers import PreTrainedTokenizer
@@ -244,7 +245,12 @@ class DatasetLoader:
         tokenizer: PreTrainedTokenizer,
         text_column: str = "text",
         max_seq_length: int = 4096,
-        num_workers: int = None
+        num_workers: int = None,
+        dynamic_length: bool = True,
+        segmentation_strategy: str = "none",
+        segment_stride: Optional[int] = None,
+        mixed_seq_lengths: Optional[List[int]] = None,
+        mixed_seq_probs: Optional[List[float]] = None,
     ) -> Dataset:
         """
         预处理数据集
@@ -255,9 +261,14 @@ class DatasetLoader:
             text_column: 文本列名
             max_seq_length: 最大序列长度
             num_workers: 处理进程数
+            dynamic_length: 是否启用动态长度（不在预处理阶段padding）
+            segmentation_strategy: 长文本分段策略：none, chunk, sliding_window, mixed
+            segment_stride: 滑动窗口步长（token数）
+            mixed_seq_lengths: 混合长度列表
+            mixed_seq_probs: 混合长度采样概率
             
         Returns:
-            Dataset: 预处理后的数据集
+            Dataset: 预处理后的数据集（variable-length，包含length列）
         """
         logger.info(f"开始预处理数据集，大小: {len(dataset)}")
         
@@ -273,108 +284,154 @@ class DatasetLoader:
                 # GPU模式下可以使用更多进程数
                 num_workers = min(16, os.cpu_count() or 1)
         
-        logger.info(f"使用 {num_workers} 个进程进行数据预处理")
+        logger.info(f"使用 {num_workers} 个进程进行数据预处理 | segmentation={segmentation_strategy} | dynamic_length={dynamic_length}")
         
-        def tokenize_function(examples):
-            """分词函数"""
-            texts = examples[actual_text_column]
+        # 归一化混合长度参数
+        if mixed_seq_lengths:
+            mixed_seq_lengths = [int(l) for l in mixed_seq_lengths if l and l > 0]
+            if not mixed_seq_lengths:
+                mixed_seq_lengths = None
+        if mixed_seq_lengths and mixed_seq_probs:
+            if len(mixed_seq_probs) != len(mixed_seq_lengths):
+                logger.warning("mixed_seq_probs 与 mixed_seq_lengths 长度不一致，将使用均匀分布")
+                mixed_seq_probs = None
+            else:
+                total_p = sum(mixed_seq_probs)
+                if total_p <= 0:
+                    mixed_seq_probs = None
+                else:
+                    mixed_seq_probs = [p/total_p for p in mixed_seq_probs]
+        
+        if segmentation_strategy not in {"none", "chunk", "sliding_window", "mixed"}:
+            logger.warning(f"未知的分段策略 {segmentation_strategy}，将使用 none")
+            segmentation_strategy = "none"
+        
+        if segmentation_strategy == "sliding_window" and (segment_stride is None or segment_stride <= 0):
+            segment_stride = max(1, max_seq_length // 4)
+            logger.info(f"自动设置滑动窗口步长: {segment_stride}")
+        
+        eos_id = tokenizer.eos_token_id
+        
+        def segment_ids(ids: List[int]) -> List[List[int]]:
+            L = len(ids)
+            segments: List[List[int]] = []
+            if L == 0:
+                return segments
             
-            # 确保文本是字符串列表
+            if segmentation_strategy == "none":
+                # 仅截断到max_seq_length
+                seg = ids[:max_seq_length]
+                segments.append(seg)
+                return segments
+            
+            if segmentation_strategy == "chunk":
+                for i in range(0, L, max_seq_length):
+                    seg = ids[i:i+max_seq_length]
+                    if len(seg) > 0:
+                        segments.append(seg)
+                return segments
+            
+            if segmentation_strategy == "sliding_window":
+                step = segment_stride or max(1, max_seq_length // 4)
+                for i in range(0, max(1, L - max_seq_length + 1), step):
+                    seg = ids[i:i+max_seq_length]
+                    if len(seg) > 0:
+                        segments.append(seg)
+                # 如果最后一段不足且没有覆盖到末尾，补充最后一段
+                if L > 0 and (not segments or segments[-1][-1] != ids[-1]):
+                    last_start = max(0, L - max_seq_length)
+                    seg = ids[last_start: last_start + max_seq_length]
+                    if len(seg) > 0:
+                        segments.append(seg)
+                return segments
+            
+            if segmentation_strategy == "mixed" and mixed_seq_lengths:
+                i = 0
+                while i < L:
+                    if mixed_seq_probs:
+                        length_choice = random.choices(mixed_seq_lengths, weights=mixed_seq_probs, k=1)[0]
+                    else:
+                        length_choice = random.choice(mixed_seq_lengths)
+                    length_choice = max(1, min(length_choice, max_seq_length))
+                    seg = ids[i:i+length_choice]
+                    if len(seg) == 0:
+                        break
+                    segments.append(seg)
+                    i += length_choice
+                return segments
+            
+            # 默认回退为chunk
+            for i in range(0, L, max_seq_length):
+                seg = ids[i:i+max_seq_length]
+                if len(seg) > 0:
+                    segments.append(seg)
+            return segments
+        
+        def tokenize_and_segment(examples: Dict[str, Any]) -> Dict[str, List[List[int]]]:
+            texts = examples[actual_text_column]
             if isinstance(texts, str):
                 texts = [texts]
+            # 清洗文本
+            texts = [t if isinstance(t, str) and t.strip() else "空文本" for t in texts]
+            input_ids_list: List[List[int]] = []
+            attention_masks_list: List[List[int]] = []
+            lengths: List[int] = []
             
-            # 过滤空文本
-            texts = [text if isinstance(text, str) and text.strip() else "空文本" for text in texts]
-            
-            # 分词
-            tokenized = tokenizer(
-                texts,
-                truncation=True,
-                padding="max_length",
-                max_length=max_seq_length,
-                return_overflowing_tokens=False,
-                return_attention_mask=True,
-            )
-            
-            return tokenized
+            for t in texts:
+                # 不在这里padding与截断（除了分段策略本身的切分）
+                ids = tokenizer.encode(t, add_special_tokens=False)
+                if eos_id is not None and (len(ids) == 0 or ids[-1] != eos_id):
+                    # 追加eos，利于语言建模
+                    ids = ids + [eos_id]
+                segs = segment_ids(ids)
+                for seg in segs:
+                    input_ids_list.append(seg)
+                    attention_masks_list.append([1] * len(seg))
+                    lengths.append(len(seg))
+            return {
+                "input_ids": input_ids_list,
+                "attention_mask": attention_masks_list,
+                "length": lengths,
+            }
         
-        # 应用分词
+        # 应用分词与分段
         try:
             processed_dataset = dataset.map(
-                tokenize_function,
+                tokenize_and_segment,
                 batched=True,
                 num_proc=num_workers,
                 remove_columns=dataset.column_names,
-                desc="分词处理",
-                load_from_cache_file=True,  # 启用缓存
+                desc="分词与分段处理",
+                load_from_cache_file=True,
             )
         except Exception as e:
-            logger.warning(f"批量处理失败，尝试单进程处理: {e}")
+            logger.warning(f"批量多进程处理失败，尝试单进程: {e}")
             processed_dataset = dataset.map(
-                tokenize_function,
+                tokenize_and_segment,
                 batched=True,
                 num_proc=1,
                 remove_columns=dataset.column_names,
-                desc="分词处理（单进程）",
+                desc="分词与分段处理（单进程）",
             )
         
-        # 过滤空样本
-        original_size = len(processed_dataset)
-        processed_dataset = processed_dataset.filter(
-            lambda x: len(x["input_ids"]) > 0 and sum(x["attention_mask"]) > 0
-        )
-        filtered_size = len(processed_dataset)
+        # 过滤空样本与过长样本（安全检查）
+        def valid_example(ex):
+            ids = ex.get("input_ids", [])
+            L = len(ids)
+            if L == 0:
+                return False
+            if L > max_seq_length:
+                # 极端情况下mixed策略可能超界，这里再次裁剪
+                ex["input_ids"] = ids[:max_seq_length]
+                ex["attention_mask"] = [1] * len(ex["input_ids"])
+                ex["length"] = len(ex["input_ids"])
+            return True
         
+        original_size = len(processed_dataset)
+        processed_dataset = processed_dataset.filter(valid_example)
+        filtered_size = len(processed_dataset)
         if filtered_size < original_size:
-            logger.warning(f"过滤了 {original_size - filtered_size} 个空样本")
+            logger.info(f"过滤了 {original_size - filtered_size} 个无效样本")
         
         logger.info(f"数据预处理完成，最终大小: {filtered_size}")
         return processed_dataset
-    
-    def split_dataset(
-        self,
-        dataset: Dataset,
-        validation_split_percentage: float = 0.1,
-        seed: int = 42
-    ) -> Dict[str, Optional[Dataset]]:
-        """
-        分割数据集为训练集和验证集
-        
-        Args:
-            dataset: 原始数据集
-            validation_split_percentage: 验证集比例
-            seed: 随机种子
-            
-        Returns:
-            Dict: 包含train_dataset和eval_dataset的字典
-        """
-        if validation_split_percentage <= 0 or validation_split_percentage >= 1:
-            logger.info("不分割验证集")
-            return {
-                "train_dataset": dataset,
-                "eval_dataset": None
-            }
-        
-        logger.info(f"分割数据集，验证集比例: {validation_split_percentage}")
-        
-        split_dataset = dataset.train_test_split(
-            test_size=validation_split_percentage,
-            seed=seed
-        )
-        
-        train_dataset = split_dataset["train"]
-        eval_dataset = split_dataset["test"]
-        
-        # 限制验证集大小以节省内存（特别是在CPU模式下）
-        max_eval_size = 1000 if self.use_cpu else 2000
-        if len(eval_dataset) > max_eval_size:
-            logger.info(f"限制验证集大小从 {len(eval_dataset)} 到 {max_eval_size}")
-            eval_dataset = eval_dataset.select(range(max_eval_size))
-        
-        logger.info(f"训练集大小: {len(train_dataset)}")
-        logger.info(f"验证集大小: {len(eval_dataset)}")
-        
-        return {
-            "train_dataset": train_dataset,
-            "eval_dataset": eval_dataset
-        }

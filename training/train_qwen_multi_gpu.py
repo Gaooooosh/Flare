@@ -38,13 +38,15 @@ from transformers.trainer_utils import get_last_checkpoint
 
 # 导入自定义模块
 import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent / 'utils'))
+sys.path.append(str(Path(__file__).parent))
+
 from patch_qwen_rope import patch_qwen_rope
 from dataset_loader import DatasetLoader, DatasetLoadingError
 from environment_adapter import EnvironmentAdapter
 from memory_optimizer import MemoryOptimizer
-from .error_handler import ErrorHandler, TrainingError, DatasetError, ModelError, EnvironmentError, MemoryError, error_handler_decorator, safe_execute, get_global_error_handler
+from error_handler import ErrorHandler, TrainingError, DatasetError, ModelError, EnvironmentError, MemoryError, error_handler_decorator, safe_execute, get_global_error_handler
 
 # 设置日志
 logging.basicConfig(
@@ -127,6 +129,35 @@ class DataArguments:
         default=None,
         metadata={"help": "数据集缓存目录"}
     )
+    # 新增：动态长度与长文本分段配置
+    dynamic_length_batching: bool = field(
+        default=True,
+        metadata={"help": "启用动态长度批处理（按批次最长样本动态padding）"}
+    )
+    long_text_segmentation: str = field(
+        default="none",
+        metadata={"help": "长文本分段策略：none, chunk, sliding_window, mixed"}
+    )
+    segment_stride: Optional[int] = field(
+        default=None,
+        metadata={"help": "滑动窗口分段的步长（token数），仅在sliding_window时生效；默认使用max_seq_length的1/4"}
+    )
+    mixed_seq_lengths: Optional[List[int]] = field(
+        default=None,
+        metadata={"help": "混合分段时使用的多种序列长度列表，如[1024,2048,4096]"}
+    )
+    mixed_seq_probs: Optional[List[float]] = field(
+        default=None,
+        metadata={"help": "混合长度的采样概率，与mixed_seq_lengths对应，总和为1，可选"}
+    )
+    adjust_seq_length_by_memory: bool = field(
+        default=True,
+        metadata={"help": "根据可用内存动态调整最大序列长度"}
+    )
+    min_seq_length: int = field(
+        default=512,
+        metadata={"help": "动态调整时允许的最小序列长度"}
+    )
 
 
 @dataclass
@@ -163,6 +194,11 @@ class TrainingArgumentsExtended(TrainingArguments):
     early_stopping_threshold: float = field(
         default=0.001,
         metadata={"help": "早停阈值"}
+    )
+    # 新增：collator按倍数padding（利于加速）
+    pad_to_multiple_of: Optional[int] = field(
+        default=8,
+        metadata={"help": "将序列padding到该数值的倍数，常用8或16；None表示不按倍数补齐"}
     )
 
 
@@ -436,24 +472,30 @@ def setup_datasets(data_args: DataArguments, tokenizer, use_cpu=False) -> Dict[s
             dataset_config=data_args.dataset_config,
             dataset_split=data_args.dataset_split,
             text_column=data_args.text_column,
-            max_samples=data_args.dataset_size
+            dataset_size=data_args.dataset_size
         )
         
         # 分割数据集
-        train_dataset, eval_dataset = dataset_loader.split_dataset(
+        split_result = dataset_loader.split_dataset(
             dataset=dataset,
-            validation_split_percentage=data_args.validation_split_percentage * 100,
+            validation_split_percentage=data_args.validation_split_percentage,
             seed=42
         )
+        train_dataset = split_result["train_dataset"]
+        eval_dataset = split_result["eval_dataset"]
         
-        # 预处理数据集
+        # 预处理数据集（支持动态长度与分段）
         train_dataset = dataset_loader.preprocess_dataset(
             dataset=train_dataset,
             tokenizer=tokenizer,
             text_column=data_args.text_column,
             max_seq_length=data_args.max_seq_length,
-            num_proc=data_args.preprocessing_num_workers,
-            description="分词训练数据"
+            num_workers=data_args.preprocessing_num_workers,
+            dynamic_length=data_args.dynamic_length_batching,
+            segmentation_strategy=data_args.long_text_segmentation,
+            segment_stride=data_args.segment_stride,
+            mixed_seq_lengths=data_args.mixed_seq_lengths,
+            mixed_seq_probs=data_args.mixed_seq_probs,
         )
         
         if eval_dataset is not None:
@@ -462,8 +504,12 @@ def setup_datasets(data_args: DataArguments, tokenizer, use_cpu=False) -> Dict[s
                 tokenizer=tokenizer,
                 text_column=data_args.text_column,
                 max_seq_length=data_args.max_seq_length,
-                num_proc=data_args.preprocessing_num_workers,
-                description="分词验证数据"
+                num_workers=data_args.preprocessing_num_workers,
+                dynamic_length=data_args.dynamic_length_batching,
+                segmentation_strategy=data_args.long_text_segmentation,
+                segment_stride=data_args.segment_stride,
+                mixed_seq_lengths=data_args.mixed_seq_lengths,
+                mixed_seq_probs=data_args.mixed_seq_probs,
             )
             
             # 限制验证集大小以节省内存
@@ -548,7 +594,8 @@ def main():
         # 处理training_args，转换旧的参数名
         training_args_data = config_data.get('training_args', {})
         if 'evaluation_strategy' in training_args_data:
-            training_args_data['eval_strategy'] = training_args_data.pop('evaluation_strategy')
+            # 保持evaluation_strategy字段名称，与Transformers的TrainingArguments保持一致
+            pass
         
         training_args = TrainingArgumentsExtended(**training_args_data)
         
@@ -631,6 +678,52 @@ def main():
     if 'dataloader_num_workers' in memory_optimizations:
         training_args.dataloader_num_workers = memory_optimizations['dataloader_num_workers']
     
+    # 新增：根据内存情况动态调整最大序列长度
+    if getattr(data_args, "adjust_seq_length_by_memory", False):
+        try:
+            stats = memory_optimizer.monitor.get_current_stats()
+            recommended = data_args.max_seq_length
+            if env_adapter.env_info.use_cpu or stats.gpu_memory_gb is None:
+                if stats.available_memory_gb is not None and stats.available_memory_gb < 8:
+                    recommended = min(recommended, 1024)
+                else:
+                    recommended = min(recommended, 2048)
+            else:
+                gm = stats.gpu_memory_gb
+                if gm >= 40:
+                    pass  # 保持原值
+                elif gm >= 24:
+                    recommended = min(recommended, 4096)
+                elif gm >= 16:
+                    recommended = min(recommended, 3072)
+                elif gm >= 12:
+                    recommended = min(recommended, 2048)
+                elif gm >= 8:
+                    recommended = min(recommended, 1536)
+                else:
+                    recommended = min(recommended, 1024)
+            recommended = max(recommended, data_args.min_seq_length)
+            if recommended != data_args.max_seq_length:
+                logger.info(f"根据内存情况调整max_seq_length: {data_args.max_seq_length} -> {recommended}")
+                data_args.max_seq_length = recommended
+                # 如果使用滑动窗口，且未显式设置或超过推荐长度，则同步调整步长
+                if (data_args.long_text_segmentation == "sliding_window" and 
+                    (data_args.segment_stride is None or data_args.segment_stride > recommended)):
+                    data_args.segment_stride = max(recommended // 4, 1)
+        except Exception as e:
+            logger.warning(f"自动调整max_seq_length失败: {e}")
+    
+    # 新增：根据动态长度批处理配置启用按长度分桶
+    if getattr(data_args, "dynamic_length_batching", False):
+        training_args.group_by_length = True
+        try:
+            # 兼容不同Transformers版本，如果字段存在则设置
+            setattr(training_args, "length_column_name", "length")
+        except Exception:
+            pass
+        # 保留length列，避免被移除
+        training_args.remove_unused_columns = False
+
     # GPU选择和设置（仅在非CPU模式下）
     if not env_adapter.env_info.use_cpu:
         selected_gpus = GPUManager.select_gpus(
@@ -665,17 +758,23 @@ def main():
     logger.info(f"输出目录: {output_dir}")
     
     # 初始化错误处理器
-    error_log_file = output_dir / "error.log"
+    error_log_file = Path(output_dir) / "error.log"
     error_handler = ErrorHandler(log_file=str(error_log_file), enable_recovery=True)
     
     # 设置为全局错误处理器
-    from .error_handler import set_global_error_handler
+    from error_handler import set_global_error_handler
     set_global_error_handler(error_handler)
     
     logger.info(f"错误处理器已初始化，日志文件: {error_log_file}")
     
     # 根据环境调整模型配置
-    model_args = env_adapter.adapt_model_config(model_args)
+    model_config_dict = dataclasses.asdict(model_args)
+    adapted_config = env_adapter.adapt_model_config(model_config_dict)
+    
+    # 更新模型参数
+    for key, value in adapted_config.items():
+        if hasattr(model_args, key):
+            setattr(model_args, key, value)
     
     # 设置模型和分词器
     logger.info("设置模型和分词器...")
@@ -689,7 +788,7 @@ def main():
         )
         if not error_handler.handle_error(model_error):
             logger.critical("模型设置失败，无法继续训练")
-            raise
+        raise
     
     # 设置数据集
     logger.info("设置数据集...")
@@ -714,16 +813,39 @@ def main():
             logger.critical("数据集设置失败，无法继续训练")
             raise
     
-    # 如果没有评估数据集，禁用 load_best_model_at_end 以避免冲突
+    # 如果没有评估数据集，禁用 load_best_model_at_end 以避免冲突；否则按需自动开启评估与保存最好模型
     if datasets["eval_dataset"] is None:
         logger.warning("没有评估数据集，禁用 load_best_model_at_end")
         training_args.load_best_model_at_end = False
-        training_args.eval_strategy = "no"
+        training_args.evaluation_strategy = "no"
+    else:
+        # 若用户未显式开启评估，则为其启用基于steps的评估与保存最好模型
+        if str(getattr(training_args, "evaluation_strategy", "no")) == "no":
+            logger.info("检测到评估数据集，自动启用 evaluation_strategy=steps 和 load_best_model_at_end=True")
+            training_args.evaluation_strategy = "steps"
+            try:
+                # 确保保存策略与评估策略一致
+                if str(getattr(training_args, "save_strategy", "steps")) == "no":
+                    training_args.save_strategy = "steps"
+            except Exception:
+                pass
+        if not getattr(training_args, "load_best_model_at_end", False):
+            training_args.load_best_model_at_end = True
+        # 配置用于选择最优模型的指标
+        try:
+            if not getattr(training_args, "metric_for_best_model", None):
+                training_args.metric_for_best_model = "eval_loss"
+            # eval_loss越小越好
+            if getattr(training_args, "greater_is_better", None) is None:
+                training_args.greater_is_better = False
+        except Exception:
+            pass
     
     # 数据整理器
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
-        mlm=False
+        mlm=False,
+        pad_to_multiple_of=training_args.pad_to_multiple_of
     )
     
     # 根据训练阶段设置模型
