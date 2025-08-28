@@ -19,7 +19,7 @@ class ModelConfig:
     """模型配置"""
     model_name: str = "Qwen/Qwen2.5-3B"
     rope_theta: float = 1000000.0
-    max_seq_length: int = 4096
+    max_seq_length: int = 8096
     no_rope_layers: list = field(default_factory=lambda: list(range(20, 33)))
     use_flash_attention: bool = True
     torch_dtype: str = "bfloat16"
@@ -31,7 +31,7 @@ class DataConfig:
     dataset_name: str = "togethercomputer/RedPajama-Data-1T-Sample"
     dataset_size: Optional[int] = 10000
     validation_split: float = 0.1
-    max_length: int = 4096
+    max_length: int = 8096
     text_column: str = "text"
     cache_dir: Optional[str] = None
 

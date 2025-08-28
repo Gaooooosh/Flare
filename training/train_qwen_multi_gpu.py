@@ -154,8 +154,8 @@ class DataArguments:
         metadata={"help": "混合长度的采样概率，与mixed_seq_lengths对应，总和为1，可选"}
     )
     adjust_seq_length_by_memory: bool = field(
-        default=True,
-        metadata={"help": "根据可用内存动态调整最大序列长度"}
+        default=False,
+        metadata={"help": "根据可用内存动态调整最大序列长度（已禁用，仅保留动态长度批处理）"}
     )
     min_seq_length: int = field(
         default=512,
@@ -681,40 +681,43 @@ def main():
     if 'dataloader_num_workers' in memory_optimizations:
         training_args.dataloader_num_workers = memory_optimizations['dataloader_num_workers']
     
-    # 新增：根据内存情况动态调整最大序列长度
+    # 已禁用：根据内存情况动态调整最大序列长度
+    # 现在只保留动态长度批处理功能，严格使用用户配置的max_seq_length
     if getattr(data_args, "adjust_seq_length_by_memory", False):
-        try:
-            stats = memory_optimizer.monitor.get_current_stats()
-            recommended = data_args.max_seq_length
-            if env_adapter.env_info.use_cpu or stats.gpu_memory_gb is None:
-                if stats.available_memory_gb is not None and stats.available_memory_gb < 8:
-                    recommended = min(recommended, 1024)
-                else:
-                    recommended = min(recommended, 2048)
-            else:
-                gm = stats.gpu_memory_gb
-                if gm >= 40:
-                    pass  # 保持原值
-                elif gm >= 24:
-                    recommended = min(recommended, 4096)
-                elif gm >= 16:
-                    recommended = min(recommended, 3072)
-                elif gm >= 12:
-                    recommended = min(recommended, 2048)
-                elif gm >= 8:
-                    recommended = min(recommended, 1536)
-                else:
-                    recommended = min(recommended, 1024)
-            recommended = max(recommended, data_args.min_seq_length)
-            if recommended != data_args.max_seq_length:
-                logger.info(f"根据内存情况调整max_seq_length: {data_args.max_seq_length} -> {recommended}")
-                data_args.max_seq_length = recommended
-                # 如果使用滑动窗口，且未显式设置或超过推荐长度，则同步调整步长
-                if (data_args.long_text_segmentation == "sliding_window" and 
-                    (data_args.segment_stride is None or data_args.segment_stride > recommended)):
-                    data_args.segment_stride = max(recommended // 4, 1)
-        except Exception as e:
-            logger.warning(f"自动调整max_seq_length失败: {e}")
+        logger.warning("adjust_seq_length_by_memory功能已被禁用，将严格使用配置的max_seq_length: {}".format(data_args.max_seq_length))
+        # 注释掉原有的内存自适应调整逻辑
+        # try:
+        #     stats = memory_optimizer.monitor.get_current_stats()
+        #     recommended = data_args.max_seq_length
+        #     if env_adapter.env_info.use_cpu or stats.gpu_memory_gb is None:
+        #         if stats.available_memory_gb is not None and stats.available_memory_gb < 8:
+        #             recommended = min(recommended, 1024)
+        #         else:
+        #             recommended = min(recommended, 2048)
+        #     else:
+        #         gm = stats.gpu_memory_gb
+        #         if gm >= 40:
+        #             pass  # 保持原值
+        #         elif gm >= 24:
+        #             recommended = min(recommended, 4096)
+        #         elif gm >= 16:
+        #             recommended = min(recommended, 3072)
+        #         elif gm >= 12:
+        #             recommended = min(recommended, 2048)
+        #         elif gm >= 8:
+        #             recommended = min(recommended, 1536)
+        #         else:
+        #             recommended = min(recommended, 1024)
+        #     recommended = max(recommended, data_args.min_seq_length)
+        #     if recommended != data_args.max_seq_length:
+        #         logger.info(f"根据内存情况调整max_seq_length: {data_args.max_seq_length} -> {recommended}")
+        #         data_args.max_seq_length = recommended
+        #         # 如果使用滑动窗口，且未显式设置或超过推荐长度，则同步调整步长
+        #         if (data_args.long_text_segmentation == "sliding_window" and 
+        #             (data_args.segment_stride is None or data_args.segment_stride > recommended)):
+        #             data_args.segment_stride = max(recommended // 4, 1)
+        # except Exception as e:
+        #     logger.warning(f"自动调整max_seq_length失败: {e}")
     
     # 新增：根据动态长度批处理配置启用按长度分桶
     if getattr(data_args, "dynamic_length_batching", False):

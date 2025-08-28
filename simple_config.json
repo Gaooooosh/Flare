@@ -5,16 +5,15 @@
     "rope_theta": 1000000.0,
     "no_rope_layers": [
       4,
-      7,
-      10,
-      13,
-      16,
-      19,
-      22,
-      25,
-      28,
-      31,
-      32
+      8,
+      11,
+      14,
+      17,
+      20,
+      23,
+      27,
+      30,
+      33
     ],
     "use_flash_attention": true,
     "torch_dtype": "bfloat16"
@@ -31,7 +30,7 @@
   "training": {
     "learning_rate": 0.0001,
     "batch_size": 2,
-    "num_epochs": 3,
+    "num_epochs": 1,
     "warmup_steps": 100,
     "logging_steps": 10,
     "save_steps": 500,

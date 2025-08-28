@@ -11,3 +11,4 @@ flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
 /cache
 /results
 /train_config_log
+/wandb

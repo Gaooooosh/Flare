@@ -84,7 +84,7 @@ class SimpleDatasetLoader:
                         dataset: Dataset,
                         tokenizer: PreTrainedTokenizer,
                         text_column: str = "text",
-                        max_length: int = 4096) -> Dataset:
+                        max_length: int = 8096) -> Dataset:
         """对数据集进行分词"""
         logger.info(f"开始分词，最大长度: {max_length}")
         
@@ -147,7 +147,7 @@ class SimpleDatasetLoader:
                        split: str = "train",
                        size_limit: Optional[int] = None,
                        validation_split: float = 0.1,
-                       max_length: int = 4096,
+                       max_length: int = 8096,
                        text_column: str = "text") -> Tuple[Dataset, Optional[Dataset]]:
         """一站式数据集准备"""
         # 加载数据集
