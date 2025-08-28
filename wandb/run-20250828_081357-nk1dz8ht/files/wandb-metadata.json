@@ -1,0 +1,89 @@
+{
+  "os": "Linux-6.8.0-71-generic-x86_64-with-glibc2.39",
+  "python": "CPython 3.12.3",
+  "startedAt": "2025-08-28T08:13:57.770339Z",
+  "program": "/home/xiaoyonggao/Flare/training/train_simple.py",
+  "codePath": "training/train_simple.py",
+  "codePathLocal": "training/train_simple.py",
+  "git": {
+    "remote": "git@github.com:Gaooooosh/Flare.git",
+    "commit": "f295c4fcccfcd0e66ab33bd07d6ad3e3636fb814"
+  },
+  "email": "yonggaoxiao@bupt.edu.cn",
+  "root": "/home/xiaoyonggao/Flare",
+  "host": "cistn02",
+  "executable": "/home/xiaoyonggao/Flare/.venv/bin/python3",
+  "cpu_count": 64,
+  "cpu_count_logical": 128,
+  "gpu": "NVIDIA A800 80GB PCIe",
+  "gpu_count": 8,
+  "disk": {
+    "/": {
+      "total": "1081646997504",
+      "used": "242275708928"
+    }
+  },
+  "memory": {
+    "total": "540646395904"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA A800 80GB PCIe",
+      "memoryTotal": "85899345920",
+      "cudaCores": 6912,
+      "architecture": "Ampere",
+      "uuid": "GPU-179ea87f-2bae-a948-c7e3-3ab242a274d2"
+    },
+    {
+      "name": "NVIDIA A800 80GB PCIe",
+      "memoryTotal": "85899345920",
+      "cudaCores": 6912,
+      "architecture": "Ampere",
+      "uuid": "GPU-3ee26c17-4b51-8fcc-0073-f909114abe7a"
+    },
+    {
+      "name": "NVIDIA A800 80GB PCIe",
+      "memoryTotal": "85899345920",
+      "cudaCores": 6912,
+      "architecture": "Ampere",
+      "uuid": "GPU-967a5587-fdd6-30b1-9c23-092a7f8b1a8c"
+    },
+    {
+      "name": "NVIDIA A800 80GB PCIe",
+      "memoryTotal": "85899345920",
+      "cudaCores": 6912,
+      "architecture": "Ampere",
+      "uuid": "GPU-ceeffce8-d447-ef0e-0cea-b357677e8fb9"
+    },
+    {
+      "name": "NVIDIA A40",
+      "memoryTotal": "51527024640",
+      "cudaCores": 10752,
+      "architecture": "Ampere",
+      "uuid": "GPU-36eb098c-314b-48c9-7c5d-47592db54cc7"
+    },
+    {
+      "name": "NVIDIA A40",
+      "memoryTotal": "48305799168",
+      "cudaCores": 10752,
+      "architecture": "Ampere",
+      "uuid": "GPU-e13133b3-c2ed-f91c-dbcd-4f6497c9be53"
+    },
+    {
+      "name": "NVIDIA A40",
+      "memoryTotal": "48305799168",
+      "cudaCores": 10752,
+      "architecture": "Ampere",
+      "uuid": "GPU-960e242f-53a1-853c-779f-634d44c0dd1e"
+    },
+    {
+      "name": "NVIDIA A40",
+      "memoryTotal": "48305799168",
+      "cudaCores": 10752,
+      "architecture": "Ampere",
+      "uuid": "GPU-6f63af26-1996-4ca7-378f-13e3636ed5e0"
+    }
+  ],
+  "cudaVersion": "12.9",
+  "writerId": "i44bxo6qaw7oy80cedqspbu095jl9frd"
+}

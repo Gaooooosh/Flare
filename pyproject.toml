@@ -2,9 +2,9 @@
 name = "flare"
 version = "0.1.0"
 description = "Qwen2.5 fine-tuning with RoPE modifications and attention analysis"
-requires-python = ">=3.8"
+requires-python = ">=3.9.0"
 dependencies = [
-    "torch>=2.0.0",
+    "torch>=2.8.0",
     "transformers>=4.36.0",
     "datasets>=2.14.0",
     "accelerate>=0.24.0",
@@ -23,4 +23,8 @@ dependencies = [
     "bitsandbytes>=0.41.0",
     "peft>=0.6.0",
     "dataset>=1.6.2",
+    "flash-attn",
 ]
+
+[tool.uv.sources]
+flash-attn = { path = "flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }

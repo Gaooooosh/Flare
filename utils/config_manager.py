@@ -31,6 +31,9 @@ class DataConfig:
     dataset_name: str = "togethercomputer/RedPajama-Data-1T-Sample"
     dataset_size: Optional[int] = 10000
     validation_split: float = 0.1
+    max_length: int = 4096
+    text_column: str = "text"
+    cache_dir: Optional[str] = None
 
 
 @dataclass

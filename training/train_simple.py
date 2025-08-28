@@ -1,15 +1,56 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-简化的Qwen训练脚本
+简化的Qwen训练脚本 - 仅支持交互式启动
 专注核心功能，避免过度工程化
 """
 
 import os
 import sys
+from pathlib import Path
+
+# 配置wandb网络环境
+os.environ["WANDB_BASE_URL"] = "https://api.bandw.top"
+
+# 早期GPU环境设置 - 必须在import torch之前
+def setup_gpu_environment():
+    """设置GPU环境变量 - 必须在import torch之前调用"""
+    config_file = "simple_config.json"
+    if Path(config_file).exists():
+        # 临时导入配置管理器来读取GPU设置
+        sys.path.append(str(Path(__file__).parent.parent / 'utils'))
+        from config_manager import ConfigManager
+        
+        try:
+            config_manager = ConfigManager(config_file)
+            config = config_manager.get_config()
+            
+            if hasattr(config.environment, 'gpu_ids') and config.environment.gpu_ids:
+                gpu_ids_str = ",".join(map(str, config.environment.gpu_ids))
+                os.environ["CUDA_VISIBLE_DEVICES"] = gpu_ids_str
+                print(f"🎯 设置CUDA_VISIBLE_DEVICES: {gpu_ids_str}")
+                # 验证环境变量设置
+                actual_value = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+                if actual_value != gpu_ids_str:
+                    print(f"⚠️ 环境变量设置异常，期望: {gpu_ids_str}, 实际: {actual_value}")
+                    raise RuntimeError(f"CUDA_VISIBLE_DEVICES设置失败")
+                else:
+                    print(f"✅ CUDA_VISIBLE_DEVICES验证成功: {actual_value}")
+            else:
+                # 如果没有指定GPU，设置为使用所有可用GPU
+                print("💻 未指定GPU，使用所有可用GPU")
+        except Exception as e:
+            print(f"⚠️ 读取GPU配置失败: {e}")
+            raise
+    else:
+        print("📋 配置文件不存在，跳过GPU环境设置")
+
+# 设置GPU环境
+setup_gpu_environment()
+
+# 现在可以安全导入torch
 import logging
 import torch
-from pathlib import Path
 from typing import Optional, List
 
 # 添加路径
@@ -23,10 +64,8 @@ from transformers import (
     DataCollatorForLanguageModeling,
 )
 
-
 from config_manager import ConfigManager
 from patch_qwen_rope import patch_qwen_rope
-from environment_adapter import EnvironmentAdapter
 from simple_dataset_loader import SimpleDatasetLoader
 
 # 设置日志
@@ -41,55 +80,86 @@ def setup_model_and_tokenizer(config):
     """设置模型和分词器"""
     logger.info(f"加载模型: {config.model.model_name}")
     
+    # 尝试初始化CUDA，如果失败则提供详细的错误信息
+    try:
+        # 强制初始化CUDA上下文
+        if torch.cuda.is_available():
+            torch.cuda.init()
+            logger.info(f"CUDA初始化成功，可用GPU数量: {torch.cuda.device_count()}")
+        else:
+            raise RuntimeError("CUDA不可用")
+    except Exception as e:
+        logger.error(f"CUDA初始化失败: {e}")
+        print("可能的解决方案:")
+        print("1. 检查NVIDIA驱动程序版本是否与PyTorch兼容")
+        print("2. 尝试重新安装PyTorch: pip install torch --upgrade")
+        print("3. 检查CUDA_VISIBLE_DEVICES环境变量设置")
+        print("4. 重启系统或重新加载NVIDIA驱动")
+        raise RuntimeError("CUDA初始化失败，无法进行GPU训练")
+    
     # 加载分词器
     tokenizer = AutoTokenizer.from_pretrained(config.model.model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
+    # GPU模式设置
+    device_map = "auto"
+    logger.info("GPU模式：使用auto device_map")
+    
+    # 确定数据类型
+    torch_dtype = getattr(torch, config.model.torch_dtype, torch.bfloat16)
+    
     # 加载模型
     model_kwargs = {
-        'torch_dtype': getattr(torch, config.model.torch_dtype),
-        'device_map': 'auto' if not config.environment.force_cpu else None,
+        "torch_dtype": torch_dtype,
+        "device_map": device_map,
+        "trust_remote_code": True,
     }
     
-    if config.model.use_flash_attention:
-        model_kwargs['attn_implementation'] = 'flash_attention_2'
+    if hasattr(config.model, 'use_flash_attention') and config.model.use_flash_attention:
+        model_kwargs["attn_implementation"] = "flash_attention_2"
     
     model = AutoModelForCausalLM.from_pretrained(
         config.model.model_name,
         **model_kwargs
     )
-    
-    # 应用RoPE补丁（在模型加载后）
-    if config.model.no_rope_layers:
-        patch_qwen_rope(model, config.model.no_rope_layers)
-        logger.info(f"已禁用层 {config.model.no_rope_layers} 的RoPE")
+
+    if hasattr(config.model, 'no_rope_layers') and config.model.no_rope_layers:
+        logger.info(f"禁用RoPE层: {config.model.no_rope_layers}")
+        patch_qwen_rope(model, no_rope_layers=config.model.no_rope_layers)
     
     # 设置RoPE参数
-    if hasattr(model.config, 'rope_theta'):
+    if hasattr(config.model, 'rope_theta') and hasattr(model.config, "rope_theta"):
         model.config.rope_theta = config.model.rope_theta
-        logger.info(f"设置rope_theta: {config.model.rope_theta}")
+        logger.info(f"设置RoPE theta为: {config.model.rope_theta}")
+    
+    # 设置最大位置嵌入
+    if hasattr(config.model, 'max_position_embeddings'):
+        model.config.max_position_embeddings = config.model.max_position_embeddings
+        logger.info(f"设置最大位置嵌入为: {config.model.max_position_embeddings}")
+    
+    # 保存no_rope_layers配置到模型config中
+    if hasattr(config.model, 'no_rope_layers'):
+        model.config.nope_layers = config.model.no_rope_layers
     
     return model, tokenizer
 
 
 def setup_dataset(config, tokenizer):
     """设置数据集"""
-    # 获取缓存目录
-    cache_dir = getattr(config.data, 'cache_dir', None)
-    dataset_loader = SimpleDatasetLoader(cache_dir=cache_dir)
+    logger.info(f"加载数据集: {config.data.dataset_name}")
     
-    # 获取数据集配置
-    dataset_config = getattr(config.data, 'dataset_config', None)
+    dataset_loader = SimpleDatasetLoader(
+        cache_dir=config.data.cache_dir
+    )
     
-    # 使用简化的数据加载器
     train_dataset, eval_dataset = dataset_loader.prepare_dataset(
         dataset_name=config.data.dataset_name,
-        dataset_config=dataset_config,
         tokenizer=tokenizer,
         size_limit=config.data.dataset_size,
         validation_split=config.data.validation_split,
-        max_length=config.model.max_seq_length,
+        max_length=config.data.max_length,
+        text_column=config.data.text_column
     )
     
     return train_dataset, eval_dataset
@@ -99,86 +169,130 @@ def setup_training_args(config, output_dir):
     """设置训练参数"""
     training_args = TrainingArguments(
         output_dir=output_dir,
-        overwrite_output_dir=True,
-        
-        # 训练设置
-        do_train=True,
-        do_eval=config.data.validation_split > 0,
-        
-        # 批次和轮数
+        num_train_epochs=config.training.num_epochs,
         per_device_train_batch_size=config.training.batch_size,
         per_device_eval_batch_size=config.training.batch_size,
-        num_train_epochs=config.training.num_epochs,
-        
-        # 学习率
+        gradient_accumulation_steps=getattr(config.training, 'gradient_accumulation_steps', 1),
         learning_rate=config.training.learning_rate,
+        weight_decay=getattr(config.training, 'weight_decay', 0.01),
         warmup_steps=config.training.warmup_steps,
-        
-        # 评估和保存
-        eval_strategy="steps" if config.data.validation_split > 0 else "no",
-        eval_steps=config.training.eval_steps,
-        save_strategy="steps",
-        save_steps=config.training.save_steps,
-        save_total_limit=3,
-        
-        # 日志
         logging_steps=config.training.logging_steps,
-        report_to=[],  # 简化，不使用tensorboard
-        
-        # 其他
-        seed=42,
-        bf16=config.model.torch_dtype == "bfloat16",
-        fp16=config.model.torch_dtype == "float16",
-        dataloader_num_workers=4,
+        save_steps=config.training.save_steps,
+        eval_steps=config.training.eval_steps,
+        eval_strategy="steps",
+        save_strategy="steps",
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
+        report_to=None,  # 禁用wandb等
+        dataloader_pin_memory=False,
+        dataloader_num_workers=0,
+        fp16=getattr(config.training, 'fp16', False),
+        bf16=getattr(config.training, 'bf16', True),
+        gradient_checkpointing=getattr(config.training, 'gradient_checkpointing', True),
+        max_grad_norm=getattr(config.training, 'max_grad_norm', 1.0),
+        seed=getattr(config.environment, 'seed', 42),
+        data_seed=getattr(config.environment, 'seed', 42),
         remove_unused_columns=False,
-        load_best_model_at_end=config.data.validation_split > 0,
     )
     
     return training_args
 
 
-def main():
-    """主训练函数"""
-    import argparse
+def run_interactive_config():
+    """运行交互式配置"""
+    logger.info("启动交互式配置...")
+    import subprocess
+    import sys
     
-    # 解析命令行参数
-    parser = argparse.ArgumentParser(description="简化的Qwen训练脚本")
-    parser.add_argument("--config", type=str, default="simple_config.json", help="配置文件路径")
-    parser.add_argument("--stage", type=int, default=1, help="训练阶段 (1或2)")
-    parser.add_argument("--output_dir", type=str, default="./output", help="输出目录")
-    parser.add_argument("--experiment_name", type=str, default=None, help="实验名称")
-    args = parser.parse_args()
+    # 运行交互式配置脚本
+    config_script = Path(__file__).parent.parent / "interactive_config.py"
+    result = subprocess.run([sys.executable, str(config_script)], 
+                          capture_output=False, text=True)
+    
+    if result.returncode != 0:
+        logger.error("交互式配置失败")
+        return False
+    
+    logger.info("交互式配置完成")
+    return True
+
+
+def main():
+    """主训练函数 - 仅支持交互式启动"""
+    
+    print("=" * 60)
+    print("🚀 Flare 交互式训练系统")
+    print("=" * 60)
+    print()
+    
+    # 检查配置文件是否存在
+    config_file = "simple_config.json"
+    
+    if not Path(config_file).exists():
+        print("📋 未找到配置文件，启动交互式配置...")
+        print()
+        if not run_interactive_config():
+            print("❌ 配置失败，退出训练")
+            return
+        print()
+    else:
+        print("📋 发现现有配置文件")
+        print("   1. 使用现有配置继续训练")
+        print("   2. 重新配置训练参数")
+        print()
+        
+        while True:
+            choice = input("请选择 (1/2): ").strip()
+            if choice == "1":
+                print("✅ 使用现有配置")
+                break
+            elif choice == "2":
+                print("🔄 启动交互式配置...")
+                print()
+                if not run_interactive_config():
+                    print("❌ 配置失败，退出训练")
+                    return
+                break
+            else:
+                print("❌ 无效选择，请输入 1 或 2")
+    
+    print()
+    print("=" * 60)
+    print("🔧 开始训练准备...")
+    print("=" * 60)
     
     # 加载配置
-    config_manager = ConfigManager(args.config)
+    if not Path(config_file).exists():
+        logger.error(f"配置文件不存在: {config_file}")
+        print("❌ 配置文件丢失，请重新运行程序")
+        return
+    
+    config_manager = ConfigManager(config_file)
     config = config_manager.get_config()
     
-    # 更新配置
-    if args.stage:
-        config.training.stage = args.stage
-    if args.output_dir:
-        config.output.base_dir = args.output_dir
-    if args.experiment_name:
-        config.output.experiment_name = args.experiment_name
+    # GPU环境已在文件开头设置
     
-    # 初始化环境适配器
-    env_adapter = EnvironmentAdapter(force_cpu=config.environment.force_cpu)
-    
-    # 设置输出目录
-    output_dir = Path(config.output.base_dir)
+    # 设置输出目录 - 强制使用/work/xiaoyonggao作为根目录
+    base_work_dir = Path("/work/xiaoyonggao")
     if config.output.experiment_name:
-        output_dir = output_dir / config.output.experiment_name
-    output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = base_work_dir / config.output.experiment_name
+    else:
+        output_dir = base_work_dir / "flare_training"
     
+    output_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"输出目录: {output_dir}")
     
     # 设置模型和分词器
+    print("📦 加载模型和分词器...")
     model, tokenizer = setup_model_and_tokenizer(config)
     
     # 设置数据集
+    print("📊 准备数据集...")
     train_dataset, eval_dataset = setup_dataset(config, tokenizer)
     
     # 设置训练参数
+    print("⚙️ 配置训练参数...")
     training_args = setup_training_args(config, str(output_dir))
     
     # 数据整理器
@@ -188,39 +302,42 @@ def main():
         pad_to_multiple_of=8
     )
     
-    # 根据训练阶段设置模型
-    if config.training.stage == 1:
-        logger.info("阶段1: 冻结预训练层")
-        # 冻结除了最后几层的所有参数
-        for name, param in model.named_parameters():
-            if "layers.2" not in name and "layers.3" not in name and "lm_head" not in name:
-                param.requires_grad = False
-    else:
-        logger.info("阶段2: 全模型微调")
-        # 解冻所有参数
-        for param in model.parameters():
-            param.requires_grad = True
+    # 设置全量微调模式
+    print("🔓 全量微调: 所有参数可训练")
+    # 确保所有参数都可训练
+    for param in model.parameters():
+        param.requires_grad = True
     
     # 创建训练器
+    print("🏗️ 创建训练器...")
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
     )
     
+    print()
+    print("=" * 60)
+    print("🎯 开始训练...")
+    print("=" * 60)
+    
     # 开始训练
-    logger.info("开始训练...")
     trainer.train()
     
     # 保存模型
     final_model_dir = output_dir / "final_model"
+    print(f"💾 保存模型到: {final_model_dir}")
     trainer.save_model(str(final_model_dir))
     tokenizer.save_pretrained(str(final_model_dir))
     
-    logger.info(f"训练完成！模型保存在: {final_model_dir}")
+    print()
+    print("=" * 60)
+    print("🎉 训练完成！")
+    print(f"📁 模型保存位置: {final_model_dir}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

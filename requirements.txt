@@ -17,7 +17,6 @@ dill==0.3.8
 einops==0.8.1
 evaluate==0.4.5
 filelock==3.18.0
-flash-attn @ file:///home/xiaoyonggao/Flare/flash_attn-2.8.2+cu128torch2.8-cp312-cp312-linux_x86_64.whl
 fonttools==4.59.0
 frozenlist==1.7.0
 fsspec==2025.3.0

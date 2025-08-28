@@ -23,6 +23,9 @@ from pathlib import Path
 import argparse
 from datetime import datetime
 
+# 配置wandb网络环境
+os.environ["WANDB_BASE_URL"] = "https://api.bandw.top"
+
 # Hugging Face imports
 from datasets import load_dataset, Dataset
 from transformers import (
