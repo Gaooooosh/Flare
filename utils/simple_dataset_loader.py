@@ -21,19 +21,31 @@ class SimpleDatasetLoader:
     
     def load_dataset(self, 
                     dataset_name: str, 
+                    dataset_config: Optional[str] = None,
                     split: str = "train",
                     size_limit: Optional[int] = None) -> Dataset:
         """加载数据集"""
         logger.info(f"加载数据集: {dataset_name}")
+        if dataset_config:
+            logger.info(f"数据集配置: {dataset_config}")
         
         try:
             # 加载数据集
-            dataset = load_dataset(
-                dataset_name,
-                split=split,
-                cache_dir=self.cache_dir,
-                streaming=False
-            )
+            if dataset_config:
+                dataset = load_dataset(
+                    dataset_name,
+                    dataset_config,
+                    split=split,
+                    cache_dir=self.cache_dir,
+                    streaming=False
+                )
+            else:
+                dataset = load_dataset(
+                    dataset_name,
+                    split=split,
+                    cache_dir=self.cache_dir,
+                    streaming=False
+                )
             
             # 限制大小
             if size_limit and len(dataset) > size_limit:
@@ -131,6 +143,7 @@ class SimpleDatasetLoader:
     def prepare_dataset(self,
                        dataset_name: str,
                        tokenizer: PreTrainedTokenizer,
+                       dataset_config: Optional[str] = None,
                        split: str = "train",
                        size_limit: Optional[int] = None,
                        validation_split: float = 0.1,
@@ -138,7 +151,7 @@ class SimpleDatasetLoader:
                        text_column: str = "text") -> Tuple[Dataset, Optional[Dataset]]:
         """一站式数据集准备"""
         # 加载数据集
-        dataset = self.load_dataset(dataset_name, split, size_limit)
+        dataset = self.load_dataset(dataset_name, dataset_config, split, size_limit)
         
         # 分词
         tokenized_dataset = self.tokenize_dataset(

@@ -46,11 +46,6 @@ def setup_model_and_tokenizer(config):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
-    # 应用RoPE补丁
-    if config.model.no_rope_layers:
-        patch_qwen_rope(config.model.no_rope_layers)
-        logger.info(f"已禁用层 {config.model.no_rope_layers} 的RoPE")
-    
     # 加载模型
     model_kwargs = {
         'torch_dtype': getattr(torch, config.model.torch_dtype),
@@ -65,6 +60,11 @@ def setup_model_and_tokenizer(config):
         **model_kwargs
     )
     
+    # 应用RoPE补丁（在模型加载后）
+    if config.model.no_rope_layers:
+        patch_qwen_rope(model, config.model.no_rope_layers)
+        logger.info(f"已禁用层 {config.model.no_rope_layers} 的RoPE")
+    
     # 设置RoPE参数
     if hasattr(model.config, 'rope_theta'):
         model.config.rope_theta = config.model.rope_theta
@@ -75,11 +75,17 @@ def setup_model_and_tokenizer(config):
 
 def setup_dataset(config, tokenizer):
     """设置数据集"""
-    dataset_loader = SimpleDatasetLoader()
+    # 获取缓存目录
+    cache_dir = getattr(config.data, 'cache_dir', None)
+    dataset_loader = SimpleDatasetLoader(cache_dir=cache_dir)
+    
+    # 获取数据集配置
+    dataset_config = getattr(config.data, 'dataset_config', None)
     
     # 使用简化的数据加载器
     train_dataset, eval_dataset = dataset_loader.prepare_dataset(
         dataset_name=config.data.dataset_name,
+        dataset_config=dataset_config,
         tokenizer=tokenizer,
         size_limit=config.data.dataset_size,
         validation_split=config.data.validation_split,
@@ -109,7 +115,7 @@ def setup_training_args(config, output_dir):
         warmup_steps=config.training.warmup_steps,
         
         # 评估和保存
-        evaluation_strategy="steps" if config.data.validation_split > 0 else "no",
+        eval_strategy="steps" if config.data.validation_split > 0 else "no",
         eval_steps=config.training.eval_steps,
         save_strategy="steps",
         save_steps=config.training.save_steps,

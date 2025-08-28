@@ -9,8 +9,12 @@
   },
   "data": {
     "dataset_name": "togethercomputer/RedPajama-Data-1T-Sample",
+    "dataset_config": null,
     "dataset_size": 10000,
-    "validation_split": 0.1
+    "validation_split": 0.1,
+    "max_length": 512,
+    "text_column": "text",
+    "cache_dir": "/datacache/huggingface"
   },
   "training": {
     "stage": 1,

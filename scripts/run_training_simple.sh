@@ -48,29 +48,25 @@ if [[ ! "$GPU_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
     exit 1
 fi
 
-# 检查Python环境
-if ! command -v python &> /dev/null && ! command -v python3 &> /dev/null; then
-    echo -e "${RED}错误: 找不到Python解释器${NC}"
-    echo -e "${YELLOW}请确保已激活Python虚拟环境或安装了Python${NC}"
+# 检查uv环境
+if ! command -v uv &> /dev/null; then
+    echo -e "${RED}错误: 找不到uv命令${NC}"
+    echo -e "${YELLOW}请确保已安装uv依赖管理工具${NC}"
     exit 1
 fi
 
-# 设置Python命令
-if command -v python &> /dev/null; then
-    PYTHON_CMD="python"
-elif command -v python3 &> /dev/null; then
-    PYTHON_CMD="python3"
-fi
+# 设置Python命令使用uv run
+PYTHON_CMD="uv run python"
 
-echo -e "${GREEN}使用Python: $(which $PYTHON_CMD)${NC}"
+echo -e "${GREEN}使用Python: uv run python${NC}"
 
 # 获取脚本所在目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # 检查必要的文件
-if [ ! -f "$PROJECT_ROOT/training/train_qwen_multi_gpu.py" ]; then
-    echo -e "${RED}错误: 找不到训练脚本 train_qwen_multi_gpu.py${NC}"
+if [ ! -f "$PROJECT_ROOT/training/train_simple.py" ]; then
+    echo -e "${RED}错误: 找不到训练脚本 train_simple.py${NC}"
     exit 1
 fi
 
@@ -79,8 +75,8 @@ if [ ! -f "$PROJECT_ROOT/utils/patch_qwen_rope.py" ]; then
     exit 1
 fi
 
-if [ ! -f "$PROJECT_ROOT/configs/training_config.json" ]; then
-    echo -e "${RED}错误: 找不到配置文件 training_config.json${NC}"
+if [ ! -f "$PROJECT_ROOT/simple_config.json" ]; then
+    echo -e "${RED}错误: 找不到配置文件 simple_config.json${NC}"
     exit 1
 fi
 
@@ -115,58 +111,27 @@ if [ $? -ne 0 ]; then
 fi
 
 # 构建训练命令
-TRAIN_CMD="$PYTHON_CMD $PROJECT_ROOT/training/train_qwen_multi_gpu.py"
+TRAIN_CMD="$PYTHON_CMD $PROJECT_ROOT/training/train_simple.py"
 
 # 添加基本参数
-TRAIN_CMD="$TRAIN_CMD --config_file $PROJECT_ROOT/configs/training_config.json"
+TRAIN_CMD="$TRAIN_CMD --config $PROJECT_ROOT/simple_config.json"
 TRAIN_CMD="$TRAIN_CMD --stage $STAGE"
-TRAIN_CMD="$TRAIN_CMD --base_output_dir $BASE_OUTPUT_DIR"
 TRAIN_CMD="$TRAIN_CMD --experiment_name $EXPERIMENT_NAME"
-TRAIN_CMD="$TRAIN_CMD --enable_tensorboard"
 
-# 添加GPU ID参数
-GPU_LIST=$(echo "$GPU_IDS" | sed 's/,/ /g')
-TRAIN_CMD="$TRAIN_CMD --gpu_ids $GPU_LIST"
+# 设置GPU环境变量
+export CUDA_VISIBLE_DEVICES="$GPU_IDS"
 
-# 根据阶段调整参数
+# 根据阶段显示信息
 if [ "$STAGE" = "1" ]; then
     echo -e "${YELLOW}阶段1: 冻结预训练层，专攻新模块${NC}"
-    TRAIN_CMD="$TRAIN_CMD --learning_rate 1e-4"
-    TRAIN_CMD="$TRAIN_CMD --per_device_train_batch_size 1"
-    TRAIN_CMD="$TRAIN_CMD --gradient_accumulation_steps 32"
-    TRAIN_CMD="$TRAIN_CMD --max_steps 1000"
-    TRAIN_CMD="$TRAIN_CMD --eval_steps 50"
-    TRAIN_CMD="$TRAIN_CMD --save_steps 100"
-    TRAIN_CMD="$TRAIN_CMD --gradient_checkpointing"
 elif [ "$STAGE" = "2" ]; then
     echo -e "${YELLOW}阶段2: 解冻全模型，整体微调${NC}"
-    TRAIN_CMD="$TRAIN_CMD --learning_rate 3e-5"
-    TRAIN_CMD="$TRAIN_CMD --per_device_train_batch_size 1"
-    TRAIN_CMD="$TRAIN_CMD --gradient_accumulation_steps 32"
-    TRAIN_CMD="$TRAIN_CMD --max_steps 2000"
-    TRAIN_CMD="$TRAIN_CMD --eval_steps 20"
-    TRAIN_CMD="$TRAIN_CMD --save_steps 50"
-    TRAIN_CMD="$TRAIN_CMD --gradient_checkpointing"
 fi
 
-# SMOKE测试: 进一步缩小数据与步数，避免长时间运行
+# SMOKE测试模式提示
 if [ -n "$SMOKE_TEST" ] && [[ "$SMOKE_TEST" =~ ^(1|y|Y|yes|YES|true|TRUE)$ ]]; then
     echo -e "${YELLOW}启用SMOKE_TEST模式：使用极少数据与步数进行快速冒烟测试${NC}"
-    TRAIN_CMD="$TRAIN_CMD --dataset_size 200"
-    TRAIN_CMD="$TRAIN_CMD --max_steps 5"
-    TRAIN_CMD="$TRAIN_CMD --eval_steps 5"
-    TRAIN_CMD="$TRAIN_CMD --save_steps 5"
-    TRAIN_CMD="$TRAIN_CMD --per_device_train_batch_size 1"
-    TRAIN_CMD="$TRAIN_CMD --gradient_accumulation_steps 1"
 fi
-
-# 添加其他常用参数
-TRAIN_CMD="$TRAIN_CMD --warmup_ratio 0.1"
-TRAIN_CMD="$TRAIN_CMD --weight_decay 0.01"
-TRAIN_CMD="$TRAIN_CMD --logging_steps 10"
-TRAIN_CMD="$TRAIN_CMD --dataloader_num_workers 4"
-TRAIN_CMD="$TRAIN_CMD --remove_unused_columns False"
-TRAIN_CMD="$TRAIN_CMD --report_to tensorboard"
 
 # 创建输出目录
 OUTPUT_DIR="$BASE_OUTPUT_DIR/$EXPERIMENT_NAME"

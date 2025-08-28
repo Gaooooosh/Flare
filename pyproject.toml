@@ -22,4 +22,5 @@ dependencies = [
     "tensorboard>=2.13.0",
     "bitsandbytes>=0.41.0",
     "peft>=0.6.0",
+    "dataset>=1.6.2",
 ]

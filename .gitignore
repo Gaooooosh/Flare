@@ -2,6 +2,8 @@
 /training-ui/node_modules
 /docs
 /.venv
+/test_output
+/output
 /.python-version
 uv.lock
 PROJECT_STRUCTURE.md
