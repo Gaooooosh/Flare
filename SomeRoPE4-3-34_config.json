@@ -1,0 +1,38 @@
+{
+  "model": {
+    "model_name": "Qwen/Qwen2.5-3B",
+    "max_seq_length": 8096,
+    "rope_theta": 1000000.0,
+    "no_rope_layers": [4,7,10,13,16,19,22,25,28,31,34],
+    "use_flash_attention": true,
+    "torch_dtype": "bfloat16"
+  },
+  "data": {
+    "dataset_name": "vllg/loong_c4",
+    "dataset_config": null,
+    "validation_split": 0.01,
+    "max_length": 8096, 
+    "dataset_size":30000,
+    "text_column": "text",
+    "cache_dir": "/datacache/huggingface"
+  },
+  "training": {
+    "learning_rate": 0.00005,
+    "batch_size": 2,
+    "num_epochs": 2,
+    "warmup_steps": 100,
+    "logging_steps": 10,
+    "save_steps": 1000,
+    "eval_steps": 1000
+  },
+  "environment": {
+    "gpu_ids": [
+      7
+    ],
+    "force_cpu": false
+  },
+  "output": {
+    "base_dir": "./output",
+    "experiment_name": "SomeRoPE[4:3:34]"
+  }
+}

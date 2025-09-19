@@ -13,9 +13,9 @@ from pathlib import Path
 os.environ["WANDB_BASE_URL"] = "https://api.bandw.top"
 
 # 早期GPU环境设置 - 必须在import torch之前
-def setup_gpu_environment():
+def setup_gpu_environment(config_path=None):
     """设置GPU环境变量 - 必须在import torch之前调用"""
-    config_file = "simple_config.json"
+    config_file = config_path or "simple_config.json"
     if Path(config_file).exists():
         # 临时导入配置管理器来读取GPU设置
         sys.path.append(str(Path(__file__).parent.parent / 'utils'))
@@ -45,8 +45,16 @@ def setup_gpu_environment():
     else:
         print("📋 配置文件不存在，跳过GPU环境设置")
 
+# 解析命令行参数并设置GPU环境
+import argparse
+parser = argparse.ArgumentParser(description="基于LoRA的Qwen训练脚本 - 支持RoPE层去除")
+parser.add_argument("-c", "--config", default=None, help="指定训练配置JSON文件路径")
+args = parser.parse_args()
+CONFIG_FILE = args.config or "simple_config.json"
+EXPLICIT_CONFIG = args.config is not None
+
 # 设置GPU环境
-setup_gpu_environment()
+setup_gpu_environment(CONFIG_FILE)
 
 # 现在可以安全导入torch
 import logging
@@ -62,6 +70,7 @@ from transformers import (
     TrainingArguments,
     Trainer,
     DataCollatorForLanguageModeling,
+    EarlyStoppingCallback,
 )
 
 # PEFT相关导入
@@ -97,9 +106,9 @@ def get_lora_config():
             "k_proj", 
             "v_proj",
             "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
+            # "gate_proj",
+            # "up_proj",
+            # "down_proj",
         ],  # 目标模块
         bias="none",  # 不训练bias
         use_rslora=False,  # 不使用RSLoRA
@@ -316,9 +325,12 @@ def main():
     print()
     
     # 检查配置文件是否存在
-    config_file = "simple_config.json"
+    config_file = CONFIG_FILE
     
     if not Path(config_file).exists():
+        if EXPLICIT_CONFIG:
+            print(f"❌ 指定的配置文件不存在: {config_file}")
+            return
         print("📋 未找到配置文件，启动交互式配置...")
         print()
         if not run_interactive_config():
@@ -327,25 +339,28 @@ def main():
         print()
     else:
         print("📋 发现现有配置文件")
-        print("   1. 使用现有配置继续训练")
-        print("   2. 重新配置训练参数")
-        print()
-        
-        while True:
-            choice = input("请选择 (1/2): ").strip()
-            if choice == "1":
-                print("✅ 使用现有配置")
-                break
-            elif choice == "2":
-                print("🔄 启动交互式配置...")
-                print()
-                if not run_interactive_config():
-                    print("❌ 配置失败，退出训练")
-                    return
-                break
-            else:
-                print("❌ 无效选择，请输入 1 或 2")
-    
+        if EXPLICIT_CONFIG:
+            print("✅ 使用指定配置文件")
+        else:
+            print("   1. 使用现有配置继续训练")
+            print("   2. 重新配置训练参数")
+            print()
+            
+            while True:
+                choice = input("请选择 (1/2): ").strip()
+                if choice == "1":
+                    print("✅ 使用现有配置")
+                    break
+                elif choice == "2":
+                    print("🔄 启动交互式配置...")
+                    print()
+                    if not run_interactive_config():
+                        print("❌ 配置失败，退出训练")
+                        return
+                    break
+                else:
+                    print("❌ 无效选择，请输入 1 或 2")
+
     print()
     print("=" * 60)
     print("🔧 开始LoRA训练准备...")
@@ -359,7 +374,7 @@ def main():
     
     config_manager = ConfigManager(config_file)
     config = config_manager.get_config()
-    
+
     # GPU环境已在文件开头设置
     
     # 设置输出目录 - 强制使用/work/xiaoyonggao作为根目录
@@ -400,6 +415,7 @@ def main():
         eval_dataset=eval_dataset,
         tokenizer=tokenizer,
         data_collator=data_collator,
+        # callbacks=[EarlyStoppingCallback(early_stopping_patience=3, early_stopping_threshold=0.0)],
     )
     
     print()
